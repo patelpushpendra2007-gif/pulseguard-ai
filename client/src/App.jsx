@@ -81,7 +81,15 @@ export default function App() {
   // Real-time Server-Sent Events subscription
   useEffect(() => {
     if (!token || !user) return;
+    let hasConnectedOnce = false;
     return openEventStream(token, (eventName) => {
+      if (eventName === 'connected') {
+        if (hasConnectedOnce) {
+          refreshOperationalData(token, zoneId);
+        }
+        hasConnectedOnce = true;
+        return;
+      }
       if (['incident_created', 'incident_updated', 'pulsebox_updated', 'zone_controls_updated', 'responder_updated'].includes(eventName)) {
         refreshOperationalData(token, zoneId);
       }
