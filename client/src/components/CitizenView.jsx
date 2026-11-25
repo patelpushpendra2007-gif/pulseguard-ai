@@ -353,6 +353,7 @@ export default function CitizenView({ user, zoneId, incidents, zoneSnapshot, onU
         body: { status: 'CANCELLED' }
       });
       setStatusNotice(`Incident ${incId} cancelled safely; ephemeral ECDH keys shredded.`);
+      onIncidentCreated?.();
     } catch (err) {
       setStatusNotice(err.message);
     }
