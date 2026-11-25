@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
@@ -8,13 +9,17 @@ import { generateEcdhKeyPair, wrapPrivateKeyForStorage } from './cryptoEngine.js
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const DATA_DIR = isServerless ? '/tmp/pulseguard-data' : path.resolve(__dirname, '../data');
+const DATA_DIR = isServerless
+  ? path.join(os.tmpdir(), 'pulseguard-data')
+  : path.resolve(__dirname, '../data');
 
 let sqliteModule = null;
-try {
-  sqliteModule = await import('node:sqlite');
-} catch {
-  sqliteModule = null;
+if (!isServerless) {
+  try {
+    sqliteModule = await import('node:sqlite');
+  } catch {
+    sqliteModule = null;
+  }
 }
 
 class PulseGuardStore {
@@ -494,7 +499,6 @@ class PulseGuardStore {
 
   updatePulseBox(id, patch) {
     const entries = Object.entries(patch).filter(([, v]) => v !== undefined);
-    if (entries.length === 0) return this.getPulseBoxById(id);
     if (this.useSqlite) {
       const sets = entries.map(([k]) => `${k} = @${k}`).join(', ');
       const params = Object.fromEntries(entries);
