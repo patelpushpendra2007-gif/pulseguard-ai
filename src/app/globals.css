@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: #05080f;
+  color: #f1f5f9;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Dark clinical contrast styling for OpenStreetMap Leaflet tiles */
+.leaflet-container {
+  background-color: #05080f !important;
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+
+.leaflet-tile-pane {
+  filter: brightness(0.84) invert(1) contrast(1.08) hue-rotate(195deg) saturate(0.45);
+}
+
+.leaflet-control-attribution {
+  background: rgba(5, 8, 15, 0.85) !important;
+  color: #94a3b8 !important;
+  font-size: 10px !important;
+}
+
+.leaflet-control-attribution a {
+  color: #38bdf8 !important;
+}

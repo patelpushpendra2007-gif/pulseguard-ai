@@ -1,8 +1,22 @@
+# Dependencies & Build
 node_modules/
+.next/
+out/
 dist/
-data/
-.env
-*.log
-.DS_Store
 
+# Environment Variables
+.env
+.env*.local
+
+# Logs & OS
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Vercel
 .vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts

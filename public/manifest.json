@@ -1,0 +1,39 @@
+{
+  "name": "PulseGuard AI — Clinical Emergency Mesh",
+  "short_name": "PulseGuard AI",
+  "description": "Zero-cloud Edge AI audio/biometric emergency sentinel, E2EE 52-byte binary SMS failover, and real-time NMC/ABDM responder mesh.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#05080F",
+  "theme_color": "#080D18",
+  "categories": ["medical", "health", "safety", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Citizen Edge Sentinel",
+      "short_name": "Sentinel",
+      "url": "/portal/citizen",
+      "description": "Live Edge AI audio/PPG/IMU guardian and one-tap Code Blue SOS"
+    },
+    {
+      "name": "Responder Mesh",
+      "short_name": "Responder",
+      "url": "/portal/responder",
+      "description": "NMC/BLS 2km Code Blue alerts and live dispatch"
+    }
+  ]
+}
