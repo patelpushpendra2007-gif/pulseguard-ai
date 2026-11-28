@@ -81,7 +81,7 @@ export interface ObdBleTelemetry {
 
 /**
  * Parses real incoming ESP32-S3 OBD-II Lite/Pro BLE UART JSON or CSV packets.
- * Example JSON: {"spd":42,"dv":31.5,"g":11.8,"dtc":"B1001"}
+ * Packet fields: speed, delta-V, peak G-force, and diagnostic trouble code.
  */
 export function parseObdBlePacket(rawText: string, previousSpeedKmh: number | null): ObdBleTelemetry | null {
   const trimmed = rawText.trim();

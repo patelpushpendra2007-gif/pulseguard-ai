@@ -15,13 +15,22 @@ export interface MapMarkerPoint {
 }
 
 export interface LiveIncidentMapProps {
-  center: { lat: number; lng: number };
+  center: { lat: number; lng: number } | null;
   zoom?: number;
   markers: MapMarkerPoint[];
   geohashCells?: string[];
   radiusCircle?: { lat: number; lng: number; radiusMeters: number } | null;
   routeLine?: Array<[number, number]> | null;
   heightClassName?: string;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function createClinicalMarkerIcon(kind: MapMarkerPoint['kind']): L.DivIcon {
@@ -56,10 +65,17 @@ export default function LiveIncidentMap({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const centerRef = useRef(center);
+  const hasCenter = center !== null;
+
+  useEffect(() => {
+    centerRef.current = center;
+  }, [center]);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    const initialCenter = centerRef.current;
+    if (!container || !initialCenter) return;
 
     if (mapRef.current) {
       mapRef.current.remove();
@@ -67,7 +83,7 @@ export default function LiveIncidentMap({
     }
 
     const map = L.map(container, {
-      center: [center.lat, center.lng],
+      center: [initialCenter.lat, initialCenter.lng],
       zoom,
       zoomControl: true,
       attributionControl: true,
@@ -87,13 +103,14 @@ export default function LiveIncidentMap({
       mapRef.current = null;
       layerGroupRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hasCenter, zoom]);
 
   useEffect(() => {
     const map = mapRef.current;
     const group = layerGroupRef.current;
-    if (!map || !group) return;
+    const centerLat = center?.lat;
+    const centerLng = center?.lng;
+    if (!map || !group || centerLat === undefined || centerLng === undefined) return;
 
     group.clearLayers();
 
@@ -136,9 +153,9 @@ export default function LiveIncidentMap({
     // Render active dispatch path
     if (routeLine && routeLine.length >= 2) {
       L.polyline(routeLine, {
-        color: '#34D399',
-        weight: 3,
-        dashArray: '8 6',
+        color: '#3B82F6',
+        weight: 5,
+        opacity: 0.9,
       }).addTo(group);
     }
 
@@ -152,8 +169,8 @@ export default function LiveIncidentMap({
       });
       marker.bindPopup(
         `<div style="font-family:system-ui,sans-serif;min-width:160px;">
-          <div style="font-weight:700;font-size:13px;color:#0F172A;">${m.title}</div>
-          ${m.subtitle ? `<div style="font-size:11px;color:#334155;margin-top:3px;">${m.subtitle}</div>` : ''}
+          <div style="font-weight:700;font-size:13px;color:#0F172A;">${escapeHtml(m.title)}</div>
+          ${m.subtitle ? `<div style="font-size:11px;color:#334155;margin-top:3px;">${escapeHtml(m.subtitle)}</div>` : ''}
           <div style="font-family:monospace;font-size:11px;color:#475569;margin-top:4px;">${m.lat.toFixed(5)}, ${m.lng.toFixed(5)}</div>
         </div>`
       );
@@ -166,15 +183,21 @@ export default function LiveIncidentMap({
     } else if (latLngs.length === 1) {
       map.setView(latLngs[0], zoom);
     } else {
-      map.setView([center.lat, center.lng], zoom);
+      map.setView([centerLat, centerLng], zoom);
     }
-  }, [center.lat, center.lng, zoom, markers, geohashCells, radiusCircle, routeLine]);
+  }, [center?.lat, center?.lng, zoom, markers, geohashCells, radiusCircle, routeLine]);
 
   return (
     <div
       className={`relative w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950 ${heightClassName}`}
     >
-      <div ref={containerRef} className="h-full w-full" />
+      {center ? (
+        <div ref={containerRef} className="h-full w-full" />
+      ) : (
+        <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-500">
+          Waiting for live location data.
+        </div>
+      )}
     </div>
   );
 }

@@ -127,7 +127,7 @@ export default function LandingPage() {
       points: [
         'Tier A (NMC/NMR Doctor/Nurse) & Tier B (AHA/Red Cross BLS) Online toggle & live GPS streaming',
         'Instant <2s Supabase Realtime Code Blue alerts filtered within 2 km GeoHash radius',
-        'Nearest PulseBox AED routing, Gemini live AHA triage protocol & Section 134A Good Samaritan Certificate',
+        'Nearest PulseBox AED routing and optional Gemini triage decision support',
       ],
     },
     {
@@ -249,7 +249,7 @@ export default function LandingPage() {
             <h2 className="mt-2 text-base font-bold text-white">2km Clinical Dispatch &amp; 112</h2>
             <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
               GeoHash micro-fencing + Leaflet live tracking + Resend family alerts + optional Gemini AHA
-              triage + Section 134A Good Samaritan ₹10L Indemnity log.
+              optional triage decision support and responder incident handover records.
             </p>
           </div>
         </section>

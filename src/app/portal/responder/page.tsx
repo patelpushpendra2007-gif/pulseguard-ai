@@ -1,9 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import {
-  Award,
   BrainCircuit,
   CheckCircle2,
   Download,
@@ -15,11 +13,16 @@ import {
   Siren,
   Stethoscope,
   AlertTriangle,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import AppNavbar from '@/components/AppNavbar';
+import EmergencyTriageCard from '@/components/EmergencyTriageCard';
+import IncidentStatusStepper from '@/components/IncidentStatusStepper';
 import LiveMapClient from '@/components/LiveMapClient';
 import type { MapMarkerPoint } from '@/components/LiveIncidentMap';
-import { useSupabaseProfile } from '@/hooks/useSupabaseProfile';
+import { usePortalAccess } from '@/hooks/useSupabaseProfile';
+import { useDrivingRoute } from '@/hooks/useDrivingRoute';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import {
   encodeGeoHash,
@@ -30,13 +33,8 @@ import {
 } from '@/lib/geohash';
 import type { HardwareNode, Incident, IncidentStatus, TriageGuidance } from '@/types/pulseguard';
 
-function buildGoodSamaritanCertId(incidentId: string): string {
-  const ts = new Date().getTime().toString(36).toUpperCase();
-  return `PG-134A-${incidentId.slice(0, 8).toUpperCase()}-${ts}`;
-}
-
 export default function ResponderPortalPage() {
-  const { loading, profile, refreshProfile } = useSupabaseProfile();
+  const { loading, profile, session, refreshProfile, authorized } = usePortalAccess('responder');
 
   const isOnline = Boolean(profile?.is_available);
   const [responderCoords, setResponderCoords] = useState<{
@@ -49,6 +47,7 @@ export default function ResponderPortalPage() {
   const [radiusOnly2Km, setRadiusOnly2Km] = useState(true);
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [recentlyClosedIncident, setRecentlyClosedIncident] = useState<Incident | null>(null);
   const [pulseBoxes, setPulseBoxes] = useState<HardwareNode[]>([]);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
@@ -58,35 +57,61 @@ export default function ResponderPortalPage() {
   const [triageGuidance, setTriageGuidance] = useState<TriageGuidance | null>(null);
 
   const knownIncidentIdsRef = useRef<Set<string>>(new Set());
+  const hasLoadedIncidentSnapshotRef = useRef(false);
+  const alertAudioContextRef = useRef<AudioContext | null>(null);
+  const [alertsMuted, setAlertsMuted] = useState(false);
 
-  const playAlertChime = useCallback(() => {
+  const getAlertAudioContext = useCallback((): AudioContext | null => {
+    if (typeof window === 'undefined') return null;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return null;
     try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.setValueAtTime(1174.66, ctx.currentTime + 0.14);
-      gain.gain.setValueAtTime(0.08, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.36);
+      if (!alertAudioContextRef.current || alertAudioContextRef.current.state === 'closed') {
+        alertAudioContextRef.current = new AudioCtx();
+      }
+      return alertAudioContextRef.current;
     } catch {
-      // ignore if autoplay blocked before user gesture
+      return null;
     }
   }, []);
+
+  const playAlertChime = useCallback(() => {
+    if (alertsMuted) return;
+    const context = getAlertAudioContext();
+    if (!context) return;
+    if (context.state === 'suspended') void context.resume().catch(() => undefined);
+
+    [880, 1174.66, 1568].forEach((frequency, index) => {
+      const startAt = context.currentTime + index * 0.2;
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, startAt);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.14, startAt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.19);
+    });
+  }, [alertsMuted, getAlertAudioContext]);
+
+  useEffect(
+    () => () => {
+      const context = alertAudioContextRef.current;
+      if (context && context.state !== 'closed') void context.close();
+    },
+    []
+  );
 
   const loadMeshData = useCallback(async () => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
 
-    const [{ data: incData }, { data: pbData }] = await Promise.all([
+    const [{ data: incData }, { data: pbData }, { data: closedData }] = await Promise.all([
       supabase
         .from('incidents')
         .select('*')
@@ -97,18 +122,31 @@ export default function ResponderPortalPage() {
         .select('*')
         .eq('node_type', 'PULSEBOX_AED')
         .eq('status', 'ONLINE'),
+      supabase
+        .from('incidents')
+        .select('*')
+        .eq('responder_id', profile.id)
+        .eq('status', 'CLOSED')
+        .order('closed_at', { ascending: false })
+        .limit(1),
     ]);
 
     const rows = (incData as Incident[]) || [];
-    for (const r of rows) {
-      if (r.status === 'ACTIVE' && !knownIncidentIdsRef.current.has(r.id)) {
-        if (knownIncidentIdsRef.current.size > 0) {
+    if (!hasLoadedIncidentSnapshotRef.current) {
+      rows
+        .filter((incident) => incident.status === 'ACTIVE')
+        .forEach((incident) => knownIncidentIdsRef.current.add(incident.id));
+      hasLoadedIncidentSnapshotRef.current = true;
+    } else {
+      for (const incident of rows) {
+        if (incident.status === 'ACTIVE' && !knownIncidentIdsRef.current.has(incident.id)) {
+          knownIncidentIdsRef.current.add(incident.id);
           playAlertChime();
         }
-        knownIncidentIdsRef.current.add(r.id);
       }
     }
     setIncidents(rows);
+    setRecentlyClosedIncident((closedData?.[0] as Incident | undefined) ?? null);
     setPulseBoxes((pbData as HardwareNode[]) || []);
   }, [profile, playAlertChime]);
 
@@ -140,6 +178,14 @@ export default function ResponderPortalPage() {
     };
   }, [profile, loadMeshData]);
 
+  useEffect(() => {
+    if (!profile) return;
+    const pollId = window.setInterval(() => {
+      void loadMeshData();
+    }, 3000);
+    return () => window.clearInterval(pollId);
+  }, [loadMeshData, profile]);
+
   const activeAssignedIncident = useMemo(
     () =>
       incidents.find(
@@ -149,6 +195,36 @@ export default function ResponderPortalPage() {
       ) ?? null,
     [incidents, profile]
   );
+
+  const assignedResponderOrigin =
+    responderCoords ??
+    (activeAssignedIncident?.responder_lat != null &&
+    activeAssignedIncident.responder_lng != null
+      ? {
+          lat: activeAssignedIncident.responder_lat,
+          lng: activeAssignedIncident.responder_lng,
+        }
+      : null);
+  const drivingRoute = useDrivingRoute(
+    activeAssignedIncident ? assignedResponderOrigin : null,
+    activeAssignedIncident
+      ? { lat: activeAssignedIncident.lat, lng: activeAssignedIncident.lng }
+      : null,
+    Boolean(activeAssignedIncident && assignedResponderOrigin && activeAssignedIncident.accepted_at)
+  );
+  const assignedDistanceM =
+    drivingRoute.route?.distanceMeters ??
+    (activeAssignedIncident && assignedResponderOrigin
+      ? haversineMeters(
+          assignedResponderOrigin.lat,
+          assignedResponderOrigin.lng,
+          activeAssignedIncident.lat,
+          activeAssignedIncident.lng
+        )
+      : null);
+  const assignedEtaSeconds =
+    drivingRoute.route?.durationSeconds ??
+    (assignedDistanceM !== null ? estimateEtaSeconds(assignedDistanceM) : null);
 
   const displayedTriageGuidance = triageGuidance ?? activeAssignedIncident?.triage_notes ?? null;
 
@@ -229,11 +305,16 @@ export default function ResponderPortalPage() {
     if (!supabase || !profile) return;
 
     const nowIso = new Date().toISOString();
-    const certId = buildGoodSamaritanCertId(incident.id);
     const credentialId =
       profile.responder_tier === 'TIER_A_NMC'
-        ? profile.nmc_registration_id || profile.abdm_hpr_id || 'NMC-VERIFIED'
-        : profile.bls_certification_id || 'BLS-VERIFIED';
+        ? profile.nmc_registration_id
+        : profile.responder_tier === 'TIER_B_BLS'
+          ? profile.bls_certification_id
+          : null;
+    if (!profile.responder_tier || !credentialId) {
+      setActionNotice('A responder tier and credential ID are required before accepting dispatches.');
+      return;
+    }
 
     const { error } = await supabase
       .from('incidents')
@@ -241,14 +322,12 @@ export default function ResponderPortalPage() {
         status: 'DISPATCHED',
         responder_id: profile.id,
         responder_name: profile.full_name,
-        responder_tier: profile.responder_tier || 'TIER_B_BLS',
-        responder_nmc_id: credentialId,
+        responder_tier: profile.responder_tier,
+        responder_credential_id: credentialId,
         responder_lat: responderCoords?.lat ?? profile.current_lat,
         responder_lng: responderCoords?.lng ?? profile.current_lng,
         responder_updated_at: nowIso,
         accepted_at: nowIso,
-        good_samaritan_cert_id: certId,
-        indemnity_amount_inr: 1000000,
       })
       .eq('id', incident.id)
       .eq('status', 'ACTIVE')
@@ -260,7 +339,7 @@ export default function ResponderPortalPage() {
     }
 
     setActionNotice(
-      `Dispatch accepted. Section 134A Good Samaritan Shield Certificate ${certId} issued (₹10,00,000 Indemnity).`
+      'Dispatch accepted and assigned to your responder account.'
     );
     await loadMeshData();
   };
@@ -297,20 +376,11 @@ export default function ResponderPortalPage() {
     try {
       const res = await fetch('/api/triage/assist', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          incidentId: incident.id,
-          triggerType: incident.trigger_type,
-          hrBpm: incident.hr_bpm,
-          spo2Pct: incident.spo2_pct,
-          hrvRmssdMs: incident.hrv_rmssd_ms,
-          crashGPeak: incident.crash_g_peak,
-          canDeltaVKmh: incident.can_delta_v_kmh,
-          rolloverDeg: incident.rollover_deg,
-          bloodGroup: incident.victim_blood_group,
-          allergies: incident.victim_allergies,
-          responderTier: profile?.responder_tier || 'TIER_B_BLS',
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token ?? ''}`,
+        },
+        body: JSON.stringify({ incidentId: incident.id }),
       });
       const json = (await res.json()) as {
         configured: boolean;
@@ -339,11 +409,9 @@ export default function ResponderPortalPage() {
     }
   };
 
-  const handleDownloadCertificate = (incident: Incident) => {
+  const handleDownloadIncidentReport = (incident: Incident) => {
     const payload = {
-      certificateId: incident.good_samaritan_cert_id,
-      statute: 'Section 134A, Motor Vehicles (Amendment) Act, 2019 & MoRTH Good Samaritan Rules 2020',
-      indemnityCoverageInr: incident.indemnity_amount_inr,
+      reportType: 'incident_handover',
       incidentId: incident.id,
       triggerType: incident.trigger_type,
       incidentLocation: { lat: incident.lat, lng: incident.lng, geohash: incident.geohash },
@@ -351,7 +419,7 @@ export default function ResponderPortalPage() {
         id: profile?.id,
         name: incident.responder_name,
         tier: incident.responder_tier,
-        credentialId: incident.responder_nmc_id,
+        credentialId: incident.responder_credential_id,
       },
       timestamps: {
         incidentCreatedAt: incident.created_at,
@@ -364,7 +432,7 @@ export default function ResponderPortalPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${incident.good_samaritan_cert_id || 'good-samaritan-shield'}.json`;
+    a.download = `pulseguard-incident-${incident.id}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -382,6 +450,10 @@ export default function ResponderPortalPage() {
       .filter(({ distM }) => !radiusOnly2Km || distM === null || distM <= 2000)
       .sort((a, b) => (a.distM ?? 0) - (b.distM ?? 0));
   }, [incidents, responderCoords, radiusOnly2Km]);
+
+  const emergencyTriageIncident = activeAssignedIncident ?? activeAlerts[0]?.incident ?? null;
+  const stepperIncident =
+    activeAssignedIncident ?? activeAlerts[0]?.incident ?? recentlyClosedIncident;
 
   // Nearest PulseBox AED relative to assigned incident or responder
   const nearestAed = useMemo(() => {
@@ -439,7 +511,7 @@ export default function ResponderPortalPage() {
         lng: pb.lng,
         kind: 'aed',
         title: pb.label,
-        subtitle: `PulseBox AED (${pb.aed_status || 'READY'})`,
+        subtitle: `PulseBox AED (${pb.aed_status || 'N/A'})`,
       });
     }
     return list;
@@ -449,35 +521,30 @@ export default function ResponderPortalPage() {
     ? { lat: activeAssignedIncident.lat, lng: activeAssignedIncident.lng }
     : responderCoords
       ? { lat: responderCoords.lat, lng: responderCoords.lng }
-      : { lat: 28.6139, lng: 77.209 };
+      : mapMarkers[0]
+        ? { lat: mapMarkers[0].lat, lng: mapMarkers[0].lng }
+        : null;
+
+  if (!authorized) {
+    return (
+      <div className="min-h-screen bg-[#05080F] p-8 text-center text-sm text-slate-300">
+        {loading ? 'Loading your account...' : 'Redirecting to your assigned portal...'}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#05080F] text-slate-100">
       <AppNavbar profile={profile} />
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {!loading && !profile && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 text-xs text-amber-100">
-            <span>
-              Authenticate as a Tier A (NMC/ABDM Doctor/Nurse) or Tier B (BLS Volunteer) responder
-              to receive live Realtime Code Blue dispatches.
-            </span>
-            <Link
-              href="/auth"
-              className="rounded-lg bg-amber-600 px-3 py-1.5 font-semibold text-white hover:bg-amber-500"
-            >
-              Sign In / Register Responder
-            </Link>
-          </div>
-        )}
-
         {/* Responder Status & Tier Bar */}
         <section className="rounded-2xl border border-slate-800 bg-[#0B1120] p-5">
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
             <div>
               <div className="flex items-center gap-2 font-mono text-xs text-emerald-400">
                 <Stethoscope className="h-4 w-4" />
-                PORTAL B · NMC / ABDM VERIFIED DOCTOR &amp; BLS RESPONDER MESH
+                PORTAL B · NMC / NMR TIER A &amp; BLS TIER B RESPONDER MESH
               </div>
               <h1 className="mt-1 text-xl font-extrabold text-white sm:text-2xl">
                 {profile?.full_name || 'Responder Dispatch Console'}
@@ -520,6 +587,28 @@ export default function ResponderPortalPage() {
 
               <button
                 type="button"
+                aria-pressed={alertsMuted}
+                onClick={() => {
+                  if (alertsMuted) {
+                    const context = getAlertAudioContext();
+                    if (context?.state === 'suspended') {
+                      void context.resume().catch(() => undefined);
+                    }
+                  }
+                  setAlertsMuted((muted) => !muted);
+                }}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 font-mono text-xs font-semibold ${
+                  alertsMuted
+                    ? 'border-slate-700 bg-slate-900 text-slate-300'
+                    : 'border-amber-500/50 bg-amber-500/10 text-amber-200'
+                }`}
+              >
+                {alertsMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                Alert audio {alertsMuted ? 'muted' : 'on'}
+              </button>
+
+              <button
+                type="button"
                 disabled={!profile}
                 onClick={handleToggleAvailability}
                 className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition disabled:opacity-50 ${
@@ -542,7 +631,9 @@ export default function ResponderPortalPage() {
           )}
         </section>
 
-        {/* Active Accepted Dispatch Panel + Good Samaritan Shield + Gemini Clinical Triage */}
+        {stepperIncident && <IncidentStatusStepper incident={stepperIncident} />}
+
+        {/* Active dispatch and clinical triage panel */}
         {activeAssignedIncident && (
           <section className="space-y-4 rounded-2xl border-2 border-emerald-500/60 bg-emerald-950/15 p-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
@@ -563,7 +654,7 @@ export default function ResponderPortalPage() {
                   <span>
                     Allergies:{' '}
                     <strong className="text-amber-300">
-                      {activeAssignedIncident.victim_allergies || 'None reported'}
+                      {activeAssignedIncident.victim_allergies || 'Not provided'}
                     </strong>
                   </span>
                   <span className="inline-flex items-center gap-1">
@@ -573,6 +664,19 @@ export default function ResponderPortalPage() {
                     {activeAssignedIncident.hrv_rmssd_ms ?? '--'} ms
                   </span>
                 </div>
+                {assignedDistanceM !== null && assignedEtaSeconds !== null && (
+                  <div className="mt-2 inline-flex items-center gap-1.5 font-mono text-xs text-blue-200">
+                    <Navigation className="h-3.5 w-3.5" />
+                    {formatEta(assignedEtaSeconds)} • {formatDistance(assignedDistanceM)} away
+                    {drivingRoute.route ? ' by road' : ' approx.'}
+                  </div>
+                )}
+                {drivingRoute.loading && (
+                  <p className="mt-1 text-[11px] text-slate-400">Refreshing driving route…</p>
+                )}
+                {drivingRoute.error && (
+                  <p className="mt-1 text-[11px] text-amber-300">{drivingRoute.error}</p>
+                )}
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -604,28 +708,17 @@ export default function ResponderPortalPage() {
               </div>
             </div>
 
-            {/* Statutory Good Samaritan Shield Certificate */}
+            {/* Incident handover record */}
             <div className="rounded-xl border border-emerald-500/30 bg-[#05080F] p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Award className="h-5 w-5 text-amber-400" />
-                  <div>
-                    <div className="text-xs font-bold text-white">
-                      Statutory Good Samaritan Shield Certificate
-                    </div>
-                    <div className="font-mono text-[11px] text-emerald-300">
-                      {activeAssignedIncident.good_samaritan_cert_id} · Section 134A MV (Amendment)
-                      Act 2019 · ₹10,00,000 Indemnity Active
-                    </div>
-                  </div>
-                </div>
+                <div className="text-xs font-bold text-white">Incident handover record</div>
                 <button
                   type="button"
-                  onClick={() => handleDownloadCertificate(activeAssignedIncident)}
+                  onClick={() => handleDownloadIncidentReport(activeAssignedIncident)}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-emerald-400"
                 >
                   <Download className="h-3.5 w-3.5" />
-                  Download Shield Log
+                  Download Report
                 </button>
               </div>
             </div>
@@ -642,7 +735,7 @@ export default function ResponderPortalPage() {
                   </span>
                 </div>
                 <span className="font-mono text-emerald-300">
-                  AED Status: {nearestAed.node.aed_status || 'READY'}
+                  AED Status: {nearestAed.node.aed_status || 'N/A'}
                 </span>
               </div>
             )}
@@ -718,6 +811,17 @@ export default function ResponderPortalPage() {
           </section>
         )}
 
+        {emergencyTriageIncident && (
+          <EmergencyTriageCard
+            incidentId={emergencyTriageIncident.id}
+            accessToken={session?.access_token ?? null}
+            incidentType={emergencyTriageIncident.trigger_type}
+            heartRate={emergencyTriageIncident.hr_bpm}
+            bloodGroup={emergencyTriageIncident.victim_blood_group}
+            allergies={emergencyTriageIncident.victim_allergies}
+          />
+        )}
+
         {/* Incoming 2km GeoHash Code Blue Alerts + Live Map */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <section className="space-y-3 rounded-2xl border border-slate-800 bg-[#0B1120] p-5 lg:col-span-5">
@@ -771,7 +875,7 @@ export default function ResponderPortalPage() {
                     className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
                   >
                     <ShieldCheck className="h-4 w-4" />
-                    Accept Dispatch (Issue Section 134A Shield)
+                    Accept Dispatch
                   </button>
                 </div>
               ))
@@ -796,14 +900,7 @@ export default function ResponderPortalPage() {
                   ? { lat: responderCoords.lat, lng: responderCoords.lng, radiusMeters: 2000 }
                   : null
               }
-              routeLine={
-                activeAssignedIncident && responderCoords
-                  ? [
-                      [responderCoords.lat, responderCoords.lng],
-                      [activeAssignedIncident.lat, activeAssignedIncident.lng],
-                    ]
-                  : null
-              }
+              routeLine={drivingRoute.route?.coordinates ?? null}
               heightClassName="h-[440px]"
             />
           </section>

@@ -10,11 +10,19 @@ function isValidHttpUrl(value: string | undefined): value is string {
   }
 }
 
+function isConfiguredKey(value: string | undefined): value is string {
+  return Boolean(
+    value &&
+      value.trim().length > 10 &&
+      !/your-|placeholder|example/i.test(value)
+  );
+}
+
 export function getSupabaseServerClient(accessToken?: string): SupabaseClient | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (!isValidHttpUrl(url) || !anonKey) {
+  if (!isValidHttpUrl(url) || !isConfiguredKey(anonKey)) {
     return null;
   }
 
@@ -37,7 +45,7 @@ export function getSupabaseAdminClient(): SupabaseClient | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!isValidHttpUrl(url) || !serviceKey) {
+  if (!isValidHttpUrl(url) || !isConfiguredKey(serviceKey)) {
     return null;
   }
 

@@ -1,20 +1,23 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
 import {
+  Activity,
   AlertOctagon,
   BatteryCharging,
   CheckCircle2,
   KeyRound,
   Lock,
   MapPin,
+  MessageSquare,
   Navigation,
   ShieldCheck,
   UserCheck,
   XCircle,
 } from 'lucide-react';
 import AppNavbar from '@/components/AppNavbar';
+import EmergencyTriageCard from '@/components/EmergencyTriageCard';
+import IncidentStatusStepper from '@/components/IncidentStatusStepper';
 import LiveMapClient from '@/components/LiveMapClient';
 import type { MapMarkerPoint } from '@/components/LiveIncidentMap';
 import EdgeAudioSentinelPanel from '@/components/citizen/EdgeAudioSentinelPanel';
@@ -22,7 +25,8 @@ import BiometricCrashPanel, {
   type LiveBiometricTelemetry,
 } from '@/components/citizen/BiometricCrashPanel';
 import BleRelayConsole from '@/components/citizen/BleRelayConsole';
-import { useSupabaseProfile } from '@/hooks/useSupabaseProfile';
+import { usePortalAccess } from '@/hooks/useSupabaseProfile';
+import { useDrivingRoute } from '@/hooks/useDrivingRoute';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import {
   sealEmergencyPacket,
@@ -46,10 +50,19 @@ import type {
 } from '@/types/pulseguard';
 
 export default function CitizenPortalPage() {
-  const { configured, loading, session, profile, error: authError, refreshProfile } =
-    useSupabaseProfile();
+  const {
+    loading,
+    session,
+    profile,
+    refreshProfile,
+    authorized,
+  } = usePortalAccess('citizen');
 
   const [powerState, setPowerState] = useState<PowerEngineState>('IDLE_SLEEP');
+  const [demoMode, setDemoMode] = useState(false);
+  const [demoSpikeTriggered, setDemoSpikeTriggered] = useState(false);
+  const [demoHeartRate, setDemoHeartRate] = useState<number | null>(null);
+  const [demoHeartRates, setDemoHeartRates] = useState<number[]>([]);
   const [gpsCoords, setGpsCoords] = useState<{
     lat: number;
     lng: number;
@@ -63,18 +76,18 @@ export default function CitizenPortalPage() {
     hrBpm: null,
     spo2Pct: null,
     hrvRmssdMs: null,
-    linearImuG: 0,
-    gPeak: 1.0,
-    canDeltaVKmh: 0,
-    rolloverDeg: 0,
-    omegaDegSec: 0,
+    linearImuG: null,
+    gPeak: null,
+    canDeltaVKmh: null,
+    rolloverDeg: null,
+    omegaDegSec: null,
     dtcCode: null,
   });
 
   // Medical Onboarding State (edits overlaid cleanly over loaded Supabase profile)
   const [profileEdits, setProfileEdits] = useState<{
     fullName?: string;
-    bloodGroup?: BloodGroup;
+    bloodGroup?: BloodGroup | '';
     allergies?: string;
     medicalConditions?: string;
     emName?: string;
@@ -83,7 +96,7 @@ export default function CitizenPortalPage() {
     dpdpConsent?: boolean;
   }>({});
   const fullName = profileEdits.fullName ?? profile?.full_name ?? '';
-  const bloodGroup = profileEdits.bloodGroup ?? profile?.blood_group ?? 'O+';
+  const bloodGroup = profileEdits.bloodGroup ?? profile?.blood_group ?? '';
   const allergies = profileEdits.allergies ?? profile?.allergies ?? '';
   const medicalConditions =
     profileEdits.medicalConditions ?? profile?.medical_conditions ?? '';
@@ -93,9 +106,11 @@ export default function CitizenPortalPage() {
   const dpdpConsent = profileEdits.dpdpConsent ?? Boolean(profile?.dpdp_consent_granted);
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileNotice, setProfileNotice] = useState<string | null>(null);
+  const [medicalIdOpen, setMedicalIdOpen] = useState(false);
 
   // Active Incidents & PulseBox AEDs
   const [activeIncident, setActiveIncident] = useState<Incident | null>(null);
+  const [recentlyClosedIncident, setRecentlyClosedIncident] = useState<Incident | null>(null);
   const [pulseBoxes, setPulseBoxes] = useState<HardwareNode[]>([]);
   const [latest52BFrame, setLatest52BFrame] = useState<string | null>(null);
   const [latestPayloadHash, setLatestPayloadHash] = useState<string | null>(null);
@@ -103,6 +118,7 @@ export default function CitizenPortalPage() {
 
   // Ephemeral session CryptoKey held strictly in volatile memory until incident closure
   const ephemeralSessionRef = useRef<EphemeralEcdhSession | null>(null);
+  const countdownAudioContextRef = useRef<AudioContext | null>(null);
 
   // 5-Second Cancelable Haptic Countdown State
   const [countdown, setCountdown] = useState<{
@@ -113,9 +129,46 @@ export default function CitizenPortalPage() {
   const [dispatching, setDispatching] = useState(false);
   const [dispatchNotice, setDispatchNotice] = useState<string | null>(null);
 
+  const playCountdownBeep = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+
+    try {
+      const context =
+        countdownAudioContextRef.current ??
+        (countdownAudioContextRef.current = new AudioCtx());
+      if (context.state === 'suspended') void context.resume().catch(() => undefined);
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const startAt = context.currentTime;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, startAt);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.16, startAt + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.16);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.17);
+    } catch {
+      setDispatchNotice('Audio alerts are unavailable in this browser.');
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      const context = countdownAudioContextRef.current;
+      if (context && context.state !== 'closed') void context.close();
+    },
+    []
+  );
+
   // Real Geolocation Watch scaled by the 3-State Low-Power Software Engine
   useEffect(() => {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    if (!authorized || typeof navigator === 'undefined' || !navigator.geolocation) {
       return;
     }
 
@@ -148,20 +201,27 @@ export default function CitizenPortalPage() {
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [powerState]);
+  }, [authorized, powerState]);
 
   // Load user's active incident + PulseBox AEDs + subscribe to Supabase Realtime
   const loadOperationalState = useCallback(async () => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
 
-    const [{ data: incRows }, { data: aedRows }] = await Promise.all([
+    const [{ data: incRows }, { data: closedRows }, { data: aedRows }] = await Promise.all([
       supabase
         .from('incidents')
         .select('*')
         .eq('victim_id', profile.id)
         .neq('status', 'CLOSED')
         .order('created_at', { ascending: false })
+        .limit(1),
+      supabase
+        .from('incidents')
+        .select('*')
+        .eq('victim_id', profile.id)
+        .eq('status', 'CLOSED')
+        .order('closed_at', { ascending: false })
         .limit(1),
       supabase
         .from('hardware_nodes')
@@ -172,13 +232,18 @@ export default function CitizenPortalPage() {
 
     const currentInc = (incRows?.[0] as Incident | undefined) ?? null;
     setActiveIncident(currentInc);
+    setRecentlyClosedIncident(
+      currentInc ? null : ((closedRows?.[0] as Incident | undefined) ?? null)
+    );
     if (currentInc) {
       setPowerState('CODE_BLUE_ACTIVE');
       setLatest52BFrame(currentInc.sms_frame_52b_b64);
       setLatestPayloadHash(currentInc.payload_sha256);
+    } else if (powerState === 'CODE_BLUE_ACTIVE') {
+      setPowerState('ARMED_VIGILANT');
     }
     setPulseBoxes((aedRows as HardwareNode[]) || []);
-  }, [profile]);
+  }, [powerState, profile]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -206,11 +271,13 @@ export default function CitizenPortalPage() {
           if (!next) return;
           if (next.status === 'CLOSED') {
             setActiveIncident(null);
+            setRecentlyClosedIncident(next);
             ephemeralSessionRef.current = null;
             setPowerState('ARMED_VIGILANT');
             setDispatchNotice('Incident closed — ephemeral ECDH P-256 session keys revoked.');
           } else {
             setActiveIncident(next);
+            setRecentlyClosedIncident(null);
             setPowerState('CODE_BLUE_ACTIVE');
           }
         }
@@ -221,6 +288,14 @@ export default function CitizenPortalPage() {
       supabase.removeChannel(channel);
     };
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile) return;
+    const pollId = window.setInterval(() => {
+      void loadOperationalState();
+    }, 3000);
+    return () => window.clearInterval(pollId);
+  }, [loadOperationalState, profile]);
 
   // Execute real Code Blue SOS Dispatch
   const executeCodeBlueDispatch = useCallback(
@@ -235,6 +310,9 @@ export default function CitizenPortalPage() {
       setDispatchNotice(null);
 
       try {
+        const dispatchTelemetry = demoMode
+          ? { ...liveTelemetry, hrBpm: demoHeartRate ?? 74 }
+          : liveTelemetry;
         let coords = gpsCoords;
         if (!coords && navigator.geolocation) {
           coords = await new Promise((resolve) => {
@@ -261,15 +339,15 @@ export default function CitizenPortalPage() {
           return;
         }
 
-        const medicalSummary = `${profile.id}|${profile.blood_group || 'UNK'}|${profile.allergies || 'NONE'}`;
+        const medicalSummary = `${profile.id}|${profile.blood_group || 'UNREPORTED'}|${profile.allergies || 'UNREPORTED'}`;
         const { packet, session: ecdhSession } = await sealEmergencyPacket(
           {
             lat: coords.lat,
             lng: coords.lng,
             medicalProfileSummary: medicalSummary,
-            hrBpm: liveTelemetry.hrBpm ?? profile.baseline_hr_bpm,
-            spo2Pct: liveTelemetry.spo2Pct ?? 98,
-            hrvRmssdMs: liveTelemetry.hrvRmssdMs ?? profile.baseline_rmssd_ms,
+            hrBpm: dispatchTelemetry.hrBpm ?? 0,
+            spo2Pct: dispatchTelemetry.spo2Pct ?? 0,
+            hrvRmssdMs: dispatchTelemetry.hrvRmssdMs ?? 0,
             triggerType,
             offlineQueued: !navigator.onLine,
           },
@@ -279,7 +357,7 @@ export default function CitizenPortalPage() {
             allergies: profile.allergies,
             medicalConditions: profile.medical_conditions,
             reason,
-            telemetry: liveTelemetry,
+            telemetry: dispatchTelemetry,
           }
         );
 
@@ -293,7 +371,11 @@ export default function CitizenPortalPage() {
           ecdhSession.aesKey
         );
         setVerifiedUnpackPreview(
-          `Verified 52B GCM Tag -> (${verified.lat}, ${verified.lng}) · HR ${verified.hrBpm} BPM · RMSSD ${verified.hrvRmssdMs} ms`
+          `Verified 52B GCM Tag -> (${verified.lat}, ${verified.lng}) · HR ${
+            verified.hrBpm > 0 ? `${verified.hrBpm} BPM` : 'not measured'
+          } · RMSSD ${
+            verified.hrvRmssdMs > 0 ? `${verified.hrvRmssdMs} ms` : 'not measured'
+          }`
         );
 
         const incidentRow = {
@@ -308,15 +390,27 @@ export default function CitizenPortalPage() {
           lat: coords.lat,
           lng: coords.lng,
           geohash: coords.geohash,
-          hr_bpm: liveTelemetry.hrBpm,
-          spo2_pct: liveTelemetry.spo2Pct,
-          hrv_rmssd_ms: liveTelemetry.hrvRmssdMs,
-          linear_imu_g: liveTelemetry.linearImuG,
-          crash_g_peak: liveTelemetry.gPeak > 1.5 ? liveTelemetry.gPeak : null,
-          can_delta_v_kmh: liveTelemetry.canDeltaVKmh > 0 ? liveTelemetry.canDeltaVKmh : null,
-          rollover_deg: liveTelemetry.rolloverDeg > 0 ? liveTelemetry.rolloverDeg : null,
-          omega_deg_s: liveTelemetry.omegaDegSec > 0 ? liveTelemetry.omegaDegSec : null,
-          dtc_code: liveTelemetry.dtcCode,
+          hr_bpm: dispatchTelemetry.hrBpm,
+          spo2_pct: dispatchTelemetry.spo2Pct,
+          hrv_rmssd_ms: dispatchTelemetry.hrvRmssdMs,
+          linear_imu_g: dispatchTelemetry.linearImuG,
+          crash_g_peak:
+            dispatchTelemetry.gPeak !== null && dispatchTelemetry.gPeak > 1.5
+              ? dispatchTelemetry.gPeak
+              : null,
+          can_delta_v_kmh:
+            dispatchTelemetry.canDeltaVKmh !== null && dispatchTelemetry.canDeltaVKmh > 0
+              ? dispatchTelemetry.canDeltaVKmh
+              : null,
+          rollover_deg:
+            dispatchTelemetry.rolloverDeg !== null && dispatchTelemetry.rolloverDeg > 0
+              ? dispatchTelemetry.rolloverDeg
+              : null,
+          omega_deg_s:
+            dispatchTelemetry.omegaDegSec !== null && dispatchTelemetry.omegaDegSec > 0
+              ? dispatchTelemetry.omegaDegSec
+              : null,
+          dtc_code: dispatchTelemetry.dtcCode,
           encrypted_payload_b64: packet.encryptedPayloadBase64,
           sms_frame_52b_b64: packet.smsFrame52BBase64,
           payload_sha256: packet.payloadSha256Hex,
@@ -326,19 +420,7 @@ export default function CitizenPortalPage() {
           email_notified: false,
         };
 
-        const notifyPayload = {
-          emergencyEmail: profile.emergency_contact_email,
-          victimName: profile.full_name,
-          triggerType,
-          lat: coords.lat,
-          lng: coords.lng,
-          geohash: coords.geohash,
-          hrBpm: liveTelemetry.hrBpm,
-          spo2Pct: liveTelemetry.spo2Pct,
-          hrvRmssdMs: liveTelemetry.hrvRmssdMs,
-          payloadSha256: packet.payloadSha256Hex,
-          smsFrame52BBase64: packet.smsFrame52BBase64,
-        };
+        const notifyPayload = {};
 
         const supabase = getSupabaseBrowserClient();
         if (!navigator.onLine || !supabase) {
@@ -346,7 +428,7 @@ export default function CitizenPortalPage() {
             localId: `sos-${Date.now()}`,
             createdAt: new Date().toISOString(),
             synced: false,
-            supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+            supabaseUrl: `${window.location.origin}/supabase-proxy`,
             supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
             accessToken: session?.access_token || '',
             incidentRow,
@@ -372,7 +454,7 @@ export default function CitizenPortalPage() {
             localId: `sos-${Date.now()}`,
             createdAt: new Date().toISOString(),
             synced: false,
-            supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+            supabaseUrl: `${window.location.origin}/supabase-proxy`,
             supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
             accessToken: session?.access_token || '',
             incidentRow,
@@ -385,22 +467,30 @@ export default function CitizenPortalPage() {
         }
 
         setActiveIncident(created as Incident);
+        setRecentlyClosedIncident(null);
         setPowerState('CODE_BLUE_ACTIVE');
 
         // Send Resend emergency family alert
         const mailRes = await fetch('/api/dispatch/notify', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...notifyPayload, incidentId: created.id }),
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.access_token ?? ''}`,
+          },
+          body: JSON.stringify({ incidentId: created.id }),
         }).catch(() => null);
 
         if (mailRes && mailRes.ok) {
           const mailJson = (await mailRes.json()) as { sent?: boolean; message?: string };
           if (mailJson.sent) {
-            await supabase
+            const { error: notifyUpdateError } = await supabase
               .from('incidents')
               .update({ email_notified: true })
               .eq('id', created.id);
+            if (notifyUpdateError) {
+              setDispatchNotice(notifyUpdateError.message);
+              return;
+            }
           }
           setDispatchNotice(
             mailJson.sent
@@ -414,7 +504,7 @@ export default function CitizenPortalPage() {
         setDispatching(false);
       }
     },
-    [dispatching, gpsCoords, liveTelemetry, profile, session?.access_token]
+    [demoHeartRate, demoMode, dispatching, gpsCoords, liveTelemetry, profile, session?.access_token]
   );
 
   // Real 5-Second Cancelable Haptic Countdown for autonomous triggers
@@ -424,10 +514,32 @@ export default function CitizenPortalPage() {
       if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
         navigator.vibrate([300, 150, 300, 150, 500, 150, 500]);
       }
+      playCountdownBeep();
       setCountdown({ secondsLeft: 5, triggerType, reason });
     },
-    [countdown, activeIncident, dispatching]
+    [countdown, activeIncident, dispatching, playCountdownBeep]
   );
+
+  useEffect(() => {
+    if (!demoMode || demoSpikeTriggered) return;
+    let sampleIndex = 0;
+    const intervalId = window.setInterval(() => {
+      sampleIndex += 1;
+      const bpm = sampleIndex < 5 ? 74 : 152;
+      setDemoHeartRate(bpm);
+      setDemoHeartRates((previous) => [...previous.slice(-35), bpm]);
+
+      if (sampleIndex === 5) {
+        setDemoSpikeTriggered(true);
+        launchHapticCountdown(
+          'PPG_BIOMETRIC_DISTRESS',
+          'Demo wearable spike detected: heart rate reached 152 BPM.'
+        );
+      }
+    }, 450);
+
+    return () => window.clearInterval(intervalId);
+  }, [demoMode, demoSpikeTriggered, launchHapticCountdown]);
 
   useEffect(() => {
     if (!countdown) return;
@@ -439,6 +551,7 @@ export default function CitizenPortalPage() {
         void executeCodeBlueDispatch(triggerType, reason);
         return;
       }
+      playCountdownBeep();
       if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
         navigator.vibrate(180);
       }
@@ -448,14 +561,14 @@ export default function CitizenPortalPage() {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [countdown, executeCodeBlueDispatch]);
+  }, [countdown, executeCodeBlueDispatch, playCountdownBeep]);
 
   const handleCloseActiveIncident = async () => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !activeIncident) return;
 
     const nowIso = new Date().toISOString();
-    await supabase
+    const { error } = await supabase
       .from('incidents')
       .update({
         status: 'CLOSED',
@@ -464,9 +577,20 @@ export default function CitizenPortalPage() {
         ephemeral_key_revoked_at: nowIso,
       })
       .eq('id', activeIncident.id);
+    if (error) {
+      setDispatchNotice(error.message);
+      return;
+    }
 
     // Zero out in-memory session key handle
     ephemeralSessionRef.current = null;
+    setRecentlyClosedIncident({
+      ...activeIncident,
+      status: 'CLOSED',
+      closed_at: nowIso,
+      ephemeral_key_revoked: true,
+      ephemeral_key_revoked_at: nowIso,
+    });
     setActiveIncident(null);
     setPowerState('ARMED_VIGILANT');
     setDispatchNotice('Incident closed and ephemeral ECDH P-256 session key revoked.');
@@ -485,42 +609,91 @@ export default function CitizenPortalPage() {
         .from('profiles')
         .update({
           full_name: fullName.trim(),
-          blood_group: bloodGroup,
-          allergies: allergies.trim() || 'None reported',
-          medical_conditions: medicalConditions.trim() || 'None reported',
+          blood_group: bloodGroup || null,
+          allergies: allergies.trim() || null,
+          medical_conditions: medicalConditions.trim() || null,
           emergency_contact_name: emName.trim(),
           emergency_contact_email: emEmail.trim(),
           emergency_contact_phone: emPhone.trim(),
           dpdp_consent_granted: dpdpConsent,
-          dpdp_consent_at: dpdpConsent ? nowIso : profile.dpdp_consent_at,
+          dpdp_consent_at: dpdpConsent ? nowIso : null,
         })
         .eq('id', profile.id);
 
-      if (error) throw error;
+      if (error) throw new Error(error.message);
 
-      if (dpdpConsent && !profile.dpdp_consent_granted) {
-        await supabase.from('dpdp_consent_logs').insert([
+      if (dpdpConsent !== profile.dpdp_consent_granted) {
+        const action = dpdpConsent ? 'GRANTED' : 'REVOKED';
+        const { error: consentLogError } = await supabase.from('dpdp_consent_logs').insert([
           {
             user_id: profile.id,
             consent_scope: 'MEDICAL_PROFILE_DISPATCH',
-            action: 'GRANTED',
+            action,
             purpose_description:
               'Explicit consent to share encrypted blood group, allergies, and live GPS upon Code Blue SOS.',
           },
           {
             user_id: profile.id,
             consent_scope: 'VOICE_RAM_SAFEWORD',
-            action: 'GRANTED',
+            action,
             purpose_description:
               'On-device volatile RAM audio processing (0 bytes stored/transmitted) for SafeWord detection.',
           },
+          {
+            user_id: profile.id,
+            consent_scope: 'BIOMETRIC_PPG_PROCESSING',
+            action,
+            purpose_description:
+              'On-device biometric signal processing for user-configured distress detection.',
+          },
+          {
+            user_id: profile.id,
+            consent_scope: 'EMERGENCY_LOCATION_SHARING',
+            action,
+            purpose_description: 'Sharing current GPS location with authorized emergency responders after SOS.',
+          },
         ]);
+        if (consentLogError) throw new Error(consentLogError.message);
       }
 
       await refreshProfile();
-      setProfileNotice('Medical profile & DPDP consent saved to Supabase PostgreSQL.');
+      setProfileNotice('Medical profile and consent settings saved to Supabase PostgreSQL.');
     } catch (err) {
       setProfileNotice(err instanceof Error ? err.message : 'Failed to save profile.');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handleSaveMedicalId = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !profile) {
+      setProfileNotice('Sign in to save your Medical ID and emergency contact.');
+      return;
+    }
+
+    setSavingProfile(true);
+    setProfileNotice(null);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          blood_group: bloodGroup || null,
+          allergies: allergies.trim() || null,
+          medical_conditions: medicalConditions.trim() || null,
+          emergency_contact_email: emEmail.trim() || null,
+          emergency_contact_phone: emPhone.trim() || null,
+        })
+        .eq('id', profile.id);
+
+      if (error) throw new Error(error.message);
+
+      await refreshProfile();
+      setMedicalIdOpen(false);
+      setProfileNotice('Medical ID and emergency contact saved to your profile.');
+    } catch (err) {
+      setProfileNotice(err instanceof Error ? err.message : 'Failed to save Medical ID.');
     } finally {
       setSavingProfile(false);
     }
@@ -529,23 +702,31 @@ export default function CitizenPortalPage() {
   const handleSaveSafewordHash = async (hashHex: string, wordCount: number) => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
-    await supabase
+    const { error } = await supabase
       .from('profiles')
       .update({ safeword_hash: hashHex, safeword_word_count: wordCount })
       .eq('id', profile.id);
+    if (error) {
+      setProfileNotice(error.message);
+      return;
+    }
     await refreshProfile();
   };
 
   const handleCalibrateBaseline = async (hrBpm: number, rmssdMs: number) => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
-    await supabase
+    const { error } = await supabase
       .from('profiles')
       .update({
         baseline_hr_bpm: Math.max(40, Math.min(150, hrBpm)),
         baseline_rmssd_ms: Math.max(10, Math.min(200, rmssdMs)),
       })
       .eq('id', profile.id);
+    if (error) {
+      setProfileNotice(error.message);
+      return;
+    }
     await refreshProfile();
   };
 
@@ -589,7 +770,7 @@ export default function CitizenPortalPage() {
         lng: pb.lng,
         kind: 'aed',
         title: pb.label,
-        subtitle: `PulseBox AED (${pb.aed_status || 'READY'})`,
+        subtitle: `PulseBox AED (${pb.aed_status || 'N/A'})`,
       });
     }
     return list;
@@ -605,72 +786,126 @@ export default function CitizenPortalPage() {
         )
       : null;
 
+  const responderRouteOrigin =
+    activeIncident?.responder_id &&
+    ['DISPATCHED', 'EN_ROUTE', 'STABILIZED'].includes(activeIncident.status) &&
+    activeIncident.responder_lat != null &&
+    activeIncident.responder_lng != null
+        ? { lat: activeIncident.responder_lat, lng: activeIncident.responder_lng }
+        : null;
+  const drivingRoute = useDrivingRoute(
+    responderRouteOrigin,
+    activeIncident ? { lat: activeIncident.lat, lng: activeIncident.lng } : null,
+    responderRouteOrigin !== null
+  );
+  const displayedDistanceM = drivingRoute.route?.distanceMeters ?? responderDistanceM;
+  const displayedEtaSeconds =
+    drivingRoute.route?.durationSeconds ??
+    (displayedDistanceM !== null ? estimateEtaSeconds(displayedDistanceM) : null);
+
   const mapCenter = activeIncident
     ? { lat: activeIncident.lat, lng: activeIncident.lng }
     : gpsCoords
       ? { lat: gpsCoords.lat, lng: gpsCoords.lng }
-      : { lat: 28.6139, lng: 77.209 };
+      : pulseBoxes[0]
+        ? { lat: pulseBoxes[0].lat, lng: pulseBoxes[0].lng }
+        : null;
+
+  const timelineIncident = activeIncident ?? recentlyClosedIncident;
+  const smsCoordinates = gpsCoords
+    ? { lat: gpsCoords.lat, lng: gpsCoords.lng }
+    : activeIncident
+      ? { lat: activeIncident.lat, lng: activeIncident.lng }
+      : recentlyClosedIncident
+        ? { lat: recentlyClosedIncident.lat, lng: recentlyClosedIncident.lng }
+        : null;
+  const smsMapUrl = smsCoordinates
+    ? `https://maps.google.com/?q=${smsCoordinates.lat.toFixed(6)},${smsCoordinates.lng.toFixed(6)}`
+    : null;
+  const smsBody = [
+    'PULSEGUARD SOS: I need emergency assistance.',
+    smsCoordinates
+      ? `Latest GPS: ${smsCoordinates.lat.toFixed(6)}, ${smsCoordinates.lng.toFixed(6)}.`
+      : 'GPS coordinates are unavailable.',
+    smsMapUrl ? `Map: ${smsMapUrl}` : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const offlineSmsUri = `sms:112?body=${encodeURIComponent(smsBody)}`;
+  const demoChartPoints = demoHeartRates
+    .map((bpm, index) => {
+      const x = demoHeartRates.length > 1 ? (index / (demoHeartRates.length - 1)) * 320 : 160;
+      const y = Math.max(12, Math.min(92, 92 - ((bpm - 60) / 110) * 74));
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+
+  const toggleDemoSpike = () => {
+    if (demoMode) {
+      setDemoMode(false);
+      setDemoSpikeTriggered(false);
+      setDemoHeartRate(null);
+      setDemoHeartRates([]);
+      return;
+    }
+    setDemoHeartRates(new Array(20).fill(74));
+    setDemoHeartRate(74);
+    setDemoSpikeTriggered(false);
+    setDemoMode(true);
+  };
+
+  if (!authorized) {
+    return (
+      <div className="min-h-screen bg-[#05080F] p-8 text-center text-sm text-slate-300">
+        {loading ? 'Loading your account...' : 'Redirecting to your assigned portal...'}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#05080F] text-slate-100">
       <AppNavbar profile={profile} />
 
-      {/* 5-Second Cancelable Haptic Countdown Overlay */}
+      {/* 5-Second Cancelable SOS Countdown */}
       {countdown && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sos-countdown-title"
+        >
           <div className="w-full max-w-md rounded-2xl border-2 border-red-500 bg-[#0B1120] p-6 text-center shadow-2xl shadow-red-900/50">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-red-500/20 text-red-400">
               <AlertOctagon className="h-8 w-8 animate-pulse" />
             </div>
-            <h2 className="mt-3 text-xl font-extrabold text-white">
-              Autonomous SOS Dispatch in {countdown.secondsLeft}s
+            <h2 id="sos-countdown-title" className="mt-3 text-xl font-extrabold text-white">
+              SOS dispatch in {countdown.secondsLeft}s
             </h2>
             <p className="mt-1 font-mono text-xs text-red-300">{countdown.triggerType}</p>
             <p className="mt-2 text-xs text-slate-300">{countdown.reason}</p>
-            <div className="mt-5 flex gap-3">
-              <button
-                type="button"
-                onClick={() => setCountdown(null)}
-                className="flex-1 rounded-xl border border-slate-600 bg-slate-800 py-3 text-sm font-bold text-white hover:bg-slate-700"
-              >
-                CANCEL (FALSE ALARM)
-              </button>
+            <p className="mt-3 text-xs text-slate-400">
+              A beep and vibration repeat each second. Cancel now if this is a false alarm.
+            </p>
+            <div className="mt-5">
               <button
                 type="button"
                 onClick={() => {
-                  const { triggerType, reason } = countdown;
                   setCountdown(null);
-                  executeCodeBlueDispatch(triggerType, reason);
+                  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+                    navigator.vibrate(0);
+                  }
+                  if (demoMode) toggleDemoSpike();
                 }}
-                className="flex-1 rounded-xl bg-red-600 py-3 text-sm font-bold text-white hover:bg-red-500"
+                className="w-full rounded-xl border border-slate-600 bg-slate-800 py-3 text-sm font-bold text-white hover:bg-slate-700"
               >
-                DISPATCH NOW
+                CANCEL (FALSE ALARM)
               </button>
             </div>
           </div>
         </div>
       )}
 
-      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {!loading && !profile && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-500/30 bg-cyan-950/25 p-4 text-xs text-cyan-100">
-            <div>
-              <strong>Local Sensor Lab Ready:</strong> Edge Audio DSP, Optical PPG, BLE GATT &amp; IMU
-              run locally in-browser.{' '}
-              {configured
-                ? 'Sign in to save your medical profile and enable live Supabase Realtime Code Blue dispatch.'
-                : 'Configure Supabase environment variables to persist dispatches.'}
-              {authError ? ` (${authError})` : ''}
-            </div>
-            <Link
-              href="/auth"
-              className="rounded-lg bg-cyan-600 px-3 py-1.5 font-semibold text-white hover:bg-cyan-500"
-            >
-              Sign In / Enroll
-            </Link>
-          </div>
-        )}
-
+      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 pb-24 sm:px-6 lg:pb-6">
         {/* Top Header: 3-State Low-Power Engine + One-Tap Manual Code Blue SOS */}
         <section className="rounded-2xl border border-slate-800 bg-[#0B1120] p-5">
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
@@ -689,6 +924,54 @@ export default function CitizenPortalPage() {
                     ? `${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)} · GeoHash ${gpsCoords.geohash} (±${gpsCoords.accuracyM}m)`
                     : gpsError || 'Acquiring live GPS fix...'}
                 </span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={demoMode}
+                  disabled={Boolean(countdown) || dispatching || Boolean(activeIncident && !demoMode)}
+                  onClick={toggleDemoSpike}
+                  className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1.5 text-[11px] font-medium text-slate-300 transition hover:border-cyan-700 hover:text-cyan-100 disabled:opacity-50"
+                >
+                  <Activity className={`h-3.5 w-3.5 ${demoMode ? 'text-rose-400' : 'text-slate-500'}`} />
+                  Demo: Simulate Wearable Spike
+                  <span className={demoMode ? 'text-rose-300' : 'text-slate-500'}>
+                    {demoMode ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+                {demoMode && (
+                  <div className="w-full max-w-lg rounded-xl border border-rose-900/60 bg-rose-950/15 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-[10px] font-bold text-rose-300">
+                        LIVE DEMO HEART RATE
+                      </span>
+                      <span className="font-mono text-xs font-bold text-white">
+                        {demoHeartRate ?? 74} BPM
+                      </span>
+                    </div>
+                    <svg
+                      viewBox="0 0 320 100"
+                      role="img"
+                      aria-label={`Simulated heart rate waveform at ${demoHeartRate ?? 74} beats per minute`}
+                      className="mt-2 h-20 w-full"
+                      preserveAspectRatio="none"
+                    >
+                      <path d="M0 92H320M0 55H320M0 18H320" stroke="#334155" strokeWidth="1" />
+                      <polyline
+                        points={demoChartPoints}
+                        fill="none"
+                        stroke="#FB7185"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <p className="text-[10px] text-slate-400">
+                      74 BPM baseline → 152 BPM spike triggers the SOS countdown.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -725,15 +1008,23 @@ export default function CitizenPortalPage() {
 
               <button
                 type="button"
-                disabled={dispatching}
+                disabled={dispatching || Boolean(countdown)}
                 onClick={() =>
-                  executeCodeBlueDispatch('MANUAL_SOS', 'One-tap manual Code Blue SOS trigger')
+                  launchHapticCountdown('MANUAL_SOS', 'One-tap manual Code Blue SOS trigger')
                 }
-                className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-red-900/40 transition hover:bg-red-500 disabled:opacity-50"
+                className="hidden items-center gap-2 rounded-xl bg-red-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-lg shadow-red-900/40 transition hover:bg-red-500 disabled:opacity-50 lg:inline-flex"
               >
                 <AlertOctagon className="h-4 w-4" />
                 {dispatching ? 'SEALING E2EE...' : 'ONE-TAP CODE BLUE SOS'}
               </button>
+              <a
+                href={offlineSmsUri}
+                className="hidden items-center gap-2 rounded-xl border border-amber-600/70 bg-amber-950/40 px-4 py-2.5 text-xs font-bold text-amber-100 hover:bg-amber-900/60 lg:inline-flex"
+                aria-label="Open an emergency SMS addressed to 112"
+              >
+                <MessageSquare className="h-4 w-4" />
+                Offline SMS SOS · 112
+              </a>
             </div>
           </div>
 
@@ -751,6 +1042,189 @@ export default function CitizenPortalPage() {
           )}
         </section>
 
+        {timelineIncident && <IncidentStatusStepper incident={timelineIncident} />}
+
+        <div
+          className="fixed inset-x-3 z-40 flex gap-2 rounded-2xl border border-slate-700 bg-[#0B1120]/95 p-2 shadow-2xl backdrop-blur lg:hidden"
+          style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.75rem)' }}
+        >
+          <button
+            type="button"
+            disabled={dispatching || Boolean(countdown)}
+            onClick={() =>
+              launchHapticCountdown('MANUAL_SOS', 'One-tap manual Code Blue SOS trigger')
+            }
+            className="inline-flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl bg-red-600 px-3 text-xs font-extrabold text-white shadow-lg shadow-red-950/40 disabled:opacity-60"
+          >
+            <AlertOctagon className="h-4 w-4" />
+            {dispatching ? 'SENDING SOS…' : 'ONE-TAP SOS'}
+          </button>
+          <a
+            href={offlineSmsUri}
+            className="inline-flex min-h-12 shrink-0 items-center justify-center gap-1.5 rounded-xl border border-amber-600/70 bg-amber-950/50 px-3 text-xs font-bold text-amber-100"
+            aria-label="Open an emergency SMS addressed to 112 with latest coordinates"
+          >
+            <MessageSquare className="h-4 w-4" />
+            SMS 112
+          </a>
+        </div>
+
+        {profile && (
+          <section className="flex flex-col justify-between gap-3 rounded-2xl border border-cyan-900/70 bg-cyan-950/20 p-4 sm:flex-row sm:items-center">
+            <div>
+              <h2 className="text-sm font-bold text-white">Medical ID &amp; Emergency Contact</h2>
+              <p className="mt-1 text-xs text-slate-300">
+                Blood group: {profile.blood_group || 'Not set'} · Emergency contact:{' '}
+                {profile.emergency_contact_email || profile.emergency_contact_phone || 'Not set'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMedicalIdOpen(true)}
+              className="shrink-0 rounded-lg border border-cyan-700 bg-cyan-950/70 px-3 py-2 text-xs font-bold text-cyan-100 hover:bg-cyan-900"
+            >
+              Edit Medical ID
+            </button>
+          </section>
+        )}
+
+        {medicalIdOpen && profile && (
+          <div
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 p-4"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setMedicalIdOpen(false);
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="medical-id-title"
+              className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-slate-700 bg-[#0B1120] p-5 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="medical-id-title" className="text-lg font-bold text-white">
+                    Medical ID &amp; Emergency Contact
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Saved to your private PulseGuard profile and used for SOS dispatch.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close Medical ID"
+                  onClick={() => setMedicalIdOpen(false)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                >
+                  <XCircle className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveMedicalId} className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="medical-id-blood-group" className="block text-xs text-slate-300">
+                    Blood group
+                  </label>
+                  <select
+                    id="medical-id-blood-group"
+                    value={bloodGroup}
+                    onChange={(event) =>
+                      setProfileEdits((prev) => ({
+                        ...prev,
+                        bloodGroup: event.target.value as BloodGroup | '',
+                      }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                  >
+                    <option value="">Not provided</option>
+                    {(['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'] as BloodGroup[]).map(
+                      (group) => (
+                        <option key={group} value={group}>
+                          {group}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="medical-id-allergies" className="block text-xs text-slate-300">
+                    Allergies
+                  </label>
+                  <input
+                    id="medical-id-allergies"
+                    value={allergies}
+                    onChange={(event) =>
+                      setProfileEdits((prev) => ({ ...prev, allergies: event.target.value }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="medical-id-conditions" className="block text-xs text-slate-300">
+                    Medical conditions
+                  </label>
+                  <input
+                    id="medical-id-conditions"
+                    value={medicalConditions}
+                    onChange={(event) =>
+                      setProfileEdits((prev) => ({
+                        ...prev,
+                        medicalConditions: event.target.value,
+                      }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="medical-id-email" className="block text-xs text-slate-300">
+                    Emergency contact email
+                  </label>
+                  <input
+                    id="medical-id-email"
+                    type="email"
+                    value={emEmail}
+                    onChange={(event) =>
+                      setProfileEdits((prev) => ({ ...prev, emEmail: event.target.value }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="medical-id-phone" className="block text-xs text-slate-300">
+                    Emergency contact phone
+                  </label>
+                  <input
+                    id="medical-id-phone"
+                    type="tel"
+                    value={emPhone}
+                    onChange={(event) =>
+                      setProfileEdits((prev) => ({ ...prev, emPhone: event.target.value }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+                <div className="flex justify-end gap-2 sm:col-span-2">
+                  <button
+                    type="button"
+                    onClick={() => setMedicalIdOpen(false)}
+                    className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingProfile}
+                    className="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-500 disabled:opacity-50"
+                  >
+                    {savingProfile ? 'Saving...' : 'Save Medical ID'}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+
         {/* Active Incident & Incoming Responder Live Tracking */}
         {activeIncident && (
           <section className="rounded-2xl border-2 border-red-500/70 bg-red-950/20 p-5">
@@ -765,16 +1239,20 @@ export default function CitizenPortalPage() {
                     ? `Responder Assigned: ${activeIncident.responder_name} (${activeIncident.responder_tier})`
                     : 'Broadcasting within 2 km GeoHash Radius for NMC/BLS Responders...'}
                 </h2>
-                {responderDistanceM !== null && (
+                {displayedDistanceM !== null && displayedEtaSeconds !== null && (
                   <div className="mt-1 flex items-center gap-3 font-mono text-xs text-emerald-300">
                     <span className="inline-flex items-center gap-1">
                       <Navigation className="h-3.5 w-3.5" />
-                      Distance: {formatDistance(responderDistanceM)}
-                    </span>
-                    <span>
-                      Dynamic ETA: {formatEta(estimateEtaSeconds(responderDistanceM))}
+                      {formatEta(displayedEtaSeconds)} • {formatDistance(displayedDistanceM)} away
+                      {drivingRoute.route ? ' by road' : ' approx.'}
                     </span>
                   </div>
+                )}
+                {drivingRoute.loading && (
+                  <p className="mt-1 text-[11px] text-slate-400">Refreshing driving route…</p>
+                )}
+                {drivingRoute.error && (
+                  <p className="mt-1 text-[11px] text-amber-300">{drivingRoute.error}</p>
                 )}
               </div>
 
@@ -788,6 +1266,17 @@ export default function CitizenPortalPage() {
               </button>
             </div>
           </section>
+        )}
+
+        {activeIncident && (
+          <EmergencyTriageCard
+            incidentId={activeIncident.id}
+            accessToken={session?.access_token ?? null}
+            incidentType={activeIncident.trigger_type}
+            heartRate={activeIncident.hr_bpm}
+            bloodGroup={activeIncident.victim_blood_group}
+            allergies={activeIncident.victim_allergies}
+          />
         )}
 
         {/* Live Tactical OpenStreetMap + Leaflet Map */}
@@ -823,14 +1312,7 @@ export default function CitizenPortalPage() {
             radiusCircle={
               gpsCoords ? { lat: gpsCoords.lat, lng: gpsCoords.lng, radiusMeters: 2000 } : null
             }
-            routeLine={
-              activeIncident?.responder_lat != null && activeIncident?.responder_lng != null
-                ? [
-                    [activeIncident.lat, activeIncident.lng],
-                    [activeIncident.responder_lat, activeIncident.responder_lng],
-                  ]
-                : null
-            }
+            routeLine={drivingRoute.route?.coordinates ?? null}
           />
         </section>
 
@@ -845,8 +1327,8 @@ export default function CitizenPortalPage() {
 
         <BiometricCrashPanel
           powerState={powerState}
-          baselineHrBpm={profile?.baseline_hr_bpm ?? 72}
-          baselineRmssdMs={profile?.baseline_rmssd_ms ?? 42}
+          baselineHrBpm={profile?.baseline_hr_bpm ?? null}
+          baselineRmssdMs={profile?.baseline_rmssd_ms ?? null}
           onCalibrateBaseline={handleCalibrateBaseline}
           onTelemetryChange={setLiveTelemetry}
           onAutonomousTrigger={launchHapticCountdown}
@@ -891,6 +1373,7 @@ export default function CitizenPortalPage() {
                   }
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
                 >
+                  <option value="">Not provided</option>
                   {(['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'] as BloodGroup[]).map((bg) => (
                     <option key={bg} value={bg}>
                       {bg}
@@ -905,7 +1388,7 @@ export default function CitizenPortalPage() {
                   type="text"
                   value={allergies}
                   onChange={(e) => setProfileEdits((p) => ({ ...p, allergies: e.target.value }))}
-                  placeholder="e.g. Penicillin, Aspirin, None"
+                  placeholder="List known allergies or leave blank"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -918,7 +1401,7 @@ export default function CitizenPortalPage() {
                   onChange={(e) =>
                     setProfileEdits((p) => ({ ...p, medicalConditions: e.target.value }))
                   }
-                  placeholder="e.g. Asthma, Type 1 Diabetes, None"
+                  placeholder="List conditions or leave blank"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -969,7 +1452,7 @@ export default function CitizenPortalPage() {
                 <label htmlFor="dpdp-consent-check" className="text-xs text-slate-300">
                   I grant explicit consent under the <strong>DPDP Act 2023</strong> for on-device
                   biometric fusion, volatile RAM audio SafeWord gating, and E2EE emergency medical
-                  dispatch to verified NMC/BLS responders &amp; 112.
+                  dispatch to enrolled NMC/BLS responders &amp; 112.
                 </label>
               </div>
 
@@ -981,7 +1464,14 @@ export default function CitizenPortalPage() {
                   </span>
                 ) : (
                   <span className="font-mono text-[11px] text-slate-500">
-                    Baseline: {profile.baseline_hr_bpm} BPM · RMSSD {profile.baseline_rmssd_ms} ms
+                    Baseline:{' '}
+                    {profile.baseline_hr_bpm == null
+                      ? 'Not calibrated'
+                      : `${profile.baseline_hr_bpm} BPM`}
+                    {' · RMSSD '}
+                    {profile.baseline_rmssd_ms == null
+                      ? 'Not calibrated'
+                      : `${profile.baseline_rmssd_ms} ms`}
                   </span>
                 )}
                 <button

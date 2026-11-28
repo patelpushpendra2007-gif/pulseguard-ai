@@ -5,6 +5,18 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
+  async rewrites() {
+    const supabaseUrl = (
+      process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://cdqmwcyvorsopwfcokfg.supabase.co'
+    ).replace(/\/$/, '');
+
+    return [
+      {
+        source: '/supabase-proxy/:path*',
+        destination: `${supabaseUrl}/:path*`,
+      },
+    ];
+  },
   async headers() {
     return [
       {

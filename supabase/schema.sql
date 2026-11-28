@@ -17,15 +17,15 @@ create table if not exists public.profiles (
   phone text,
   blood_group text
     check (blood_group is null or blood_group in ('A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-')),
-  allergies text default 'None reported',
-  medical_conditions text default 'None reported',
+  allergies text,
+  medical_conditions text,
   emergency_contact_name text,
   emergency_contact_email text,
   emergency_contact_phone text,
   safeword_hash text,
   safeword_word_count integer default 2 check (safeword_word_count between 1 and 8),
-  baseline_hr_bpm integer not null default 72 check (baseline_hr_bpm between 35 and 160),
-  baseline_rmssd_ms numeric(6,2) not null default 42.00 check (baseline_rmssd_ms between 5 and 250),
+  baseline_hr_bpm integer check (baseline_hr_bpm is null or baseline_hr_bpm between 35 and 160),
+  baseline_rmssd_ms numeric(6,2) check (baseline_rmssd_ms is null or baseline_rmssd_ms between 5 and 250),
   responder_tier text
     check (responder_tier is null or responder_tier in ('TIER_A_NMC', 'TIER_B_BLS')),
   nmc_registration_id text,
@@ -49,6 +49,13 @@ create index if not exists idx_profiles_role_available
 create index if not exists idx_profiles_geohash
   on public.profiles (current_geohash);
 
+alter table public.profiles alter column allergies drop default;
+alter table public.profiles alter column medical_conditions drop default;
+alter table public.profiles alter column baseline_hr_bpm drop default;
+alter table public.profiles alter column baseline_hr_bpm drop not null;
+alter table public.profiles alter column baseline_rmssd_ms drop default;
+alter table public.profiles alter column baseline_rmssd_ms drop not null;
+
 -- ----------------------------------------------------------------------------
 -- 2. HARDWARE NODES TABLE (OBD-II Lite/Pro Dongles & PulseBox AED Cabinets)
 -- ----------------------------------------------------------------------------
@@ -59,11 +66,11 @@ create table if not exists public.hardware_nodes (
   node_type text not null
     check (node_type in ('OBD_II_LITE', 'OBD_II_PRO', 'PULSEBOX_AED')),
   label text not null,
-  firmware_version text not null default '1.0.0',
+  firmware_version text not null,
   lat double precision not null check (lat between -90 and 90),
   lng double precision not null check (lng between -180 and 180),
   geohash text not null,
-  status text not null default 'ONLINE'
+  status text not null default 'OFFLINE'
     check (status in ('ONLINE', 'OFFLINE', 'ALERT', 'MAINTENANCE')),
   aed_status text default 'N/A'
     check (aed_status in ('READY', 'UNLOCKED', 'IN_USE', 'SERVICE_REQUIRED', 'N/A')),
@@ -78,6 +85,9 @@ create index if not exists idx_hardware_nodes_type
   on public.hardware_nodes (node_type, status);
 create index if not exists idx_hardware_nodes_geohash
   on public.hardware_nodes (geohash);
+
+alter table public.hardware_nodes alter column firmware_version drop default;
+alter table public.hardware_nodes alter column status set default 'OFFLINE';
 
 -- ----------------------------------------------------------------------------
 -- 3. INCIDENTS TABLE (Code Blue SOS, Crash Physics, E2EE 52B SMS & Dispatch)
@@ -126,12 +136,10 @@ create table if not exists public.incidents (
   responder_name text,
   responder_tier text
     check (responder_tier is null or responder_tier in ('TIER_A_NMC', 'TIER_B_BLS')),
-  responder_nmc_id text,
+  responder_credential_id text,
   responder_lat double precision check (responder_lat is null or (responder_lat between -90 and 90)),
   responder_lng double precision check (responder_lng is null or (responder_lng between -180 and 180)),
   responder_updated_at timestamptz,
-  good_samaritan_cert_id text,
-  indemnity_amount_inr integer not null default 1000000 check (indemnity_amount_inr = 1000000),
   triage_notes jsonb,
   accepted_at timestamptz,
   en_route_at timestamptz,
@@ -140,6 +148,29 @@ create table if not exists public.incidents (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.incidents drop column if exists good_samaritan_cert_id;
+alter table public.incidents drop column if exists indemnity_amount_inr;
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'incidents'
+      and column_name = 'responder_nmc_id'
+  ) then
+    if not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'incidents'
+        and column_name = 'responder_credential_id'
+    ) then
+      execute 'alter table public.incidents rename column responder_nmc_id to responder_credential_id';
+    else
+      execute 'update public.incidents set responder_credential_id = coalesce(responder_credential_id, responder_nmc_id)';
+      execute 'alter table public.incidents drop column responder_nmc_id';
+    end if;
+  end if;
+end;
+$$;
 
 create index if not exists idx_incidents_status_created
   on public.incidents (status, created_at desc);
@@ -189,6 +220,32 @@ begin
 end;
 $$;
 
+create or replace function public.prevent_profile_role_escalation()
+returns trigger
+language plpgsql
+as $$
+begin
+  if auth.role() = 'authenticated' then
+    if new.role is distinct from old.role
+      or new.responder_tier is distinct from old.responder_tier
+      or new.nmc_registration_id is distinct from old.nmc_registration_id
+      or new.abdm_hpr_id is distinct from old.abdm_hpr_id
+      or new.bls_certification_id is distinct from old.bls_certification_id then
+      raise exception 'Role and responder credentials can only be provisioned by an administrator.';
+    end if;
+    if old.role <> 'responder' and new.is_available then
+      raise exception 'Only responder accounts can enable responder availability.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_profiles_prevent_role_escalation on public.profiles;
+create trigger trg_profiles_prevent_role_escalation
+  before update on public.profiles
+  for each row execute function public.prevent_profile_role_escalation();
+
 drop trigger if exists trg_profiles_updated_at on public.profiles;
 create trigger trg_profiles_updated_at
   before update on public.profiles
@@ -215,13 +272,23 @@ declare
   requested_tier text;
 begin
   requested_role := coalesce(new.raw_user_meta_data ->> 'role', 'citizen');
-  if requested_role not in ('citizen', 'responder', 'dispatcher', 'admin') then
+  if requested_role not in ('citizen', 'responder') then
     requested_role := 'citizen';
   end if;
 
   requested_tier := new.raw_user_meta_data ->> 'responder_tier';
-  if requested_tier not in ('TIER_A_NMC', 'TIER_B_BLS') then
+  if requested_role <> 'responder' or requested_tier not in ('TIER_A_NMC', 'TIER_B_BLS') then
     requested_tier := null;
+  end if;
+
+  if requested_role = 'responder' then
+    if requested_tier is null
+      or (requested_tier = 'TIER_A_NMC'
+        and nullif(trim(new.raw_user_meta_data ->> 'nmc_registration_id'), '') is null)
+      or (requested_tier = 'TIER_B_BLS'
+        and nullif(trim(new.raw_user_meta_data ->> 'bls_certification_id'), '') is null) then
+      raise exception 'Responder sign-up requires a tier and its credential ID.';
+    end if;
   end if;
 
   insert into public.profiles (
@@ -287,7 +354,6 @@ create policy "profiles_select_policy"
   using (
     auth.uid() = id
     or public.get_my_role() in ('dispatcher', 'admin')
-    or (role = 'responder' and is_available = true)
     or exists (
       select 1 from public.incidents i
       where (i.victim_id = profiles.id or i.responder_id = profiles.id)
@@ -298,13 +364,6 @@ create policy "profiles_select_policy"
         )
     )
   );
-
-drop policy if exists "profiles_insert_own" on public.profiles;
-create policy "profiles_insert_own"
-  on public.profiles
-  for insert
-  to authenticated
-  with check (auth.uid() = id);
 
 drop policy if exists "profiles_update_own" on public.profiles;
 create policy "profiles_update_own"
@@ -331,34 +390,22 @@ create policy "hardware_nodes_insert_policy"
   on public.hardware_nodes
   for insert
   to authenticated
-  with check (
-    auth.uid() = owner_id
-    or public.get_my_role() in ('dispatcher', 'admin')
-  );
+  with check (public.get_my_role() = 'admin');
 
 drop policy if exists "hardware_nodes_update_policy" on public.hardware_nodes;
 create policy "hardware_nodes_update_policy"
   on public.hardware_nodes
   for update
   to authenticated
-  using (
-    auth.uid() = owner_id
-    or public.get_my_role() in ('dispatcher', 'admin')
-  )
-  with check (
-    auth.uid() = owner_id
-    or public.get_my_role() in ('dispatcher', 'admin')
-  );
+  using (public.get_my_role() = 'admin')
+  with check (public.get_my_role() = 'admin');
 
 drop policy if exists "hardware_nodes_delete_policy" on public.hardware_nodes;
 create policy "hardware_nodes_delete_policy"
   on public.hardware_nodes
   for delete
   to authenticated
-  using (
-    auth.uid() = owner_id
-    or public.get_my_role() = 'admin'
-  );
+  using (public.get_my_role() = 'admin');
 
 -- INCIDENTS POLICIES
 drop policy if exists "incidents_select_policy" on public.incidents;
@@ -408,7 +455,7 @@ create policy "dpdp_logs_select_policy"
   to authenticated
   using (
     auth.uid() = user_id
-    or public.get_my_role() in ('dispatcher', 'admin')
+    or public.get_my_role() = 'admin'
   );
 
 drop policy if exists "dpdp_logs_insert_own" on public.dpdp_consent_logs;
@@ -421,4 +468,26 @@ create policy "dpdp_logs_insert_own"
 -- ----------------------------------------------------------------------------
 -- 8. REALTIME PUBLICATION
 -- ----------------------------------------------------------------------------
-alter publication supabase_realtime add table public.incidents, public.profiles;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'incidents'
+  ) then
+    execute 'alter publication supabase_realtime add table public.incidents';
+  end if;
+
+  if not exists (
+    select 1
+    from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'profiles'
+  ) then
+    execute 'alter publication supabase_realtime add table public.profiles';
+  end if;
+end;
+$$;

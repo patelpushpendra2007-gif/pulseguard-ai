@@ -146,11 +146,16 @@ export async function flushOfflineOutboxClient(): Promise<number> {
       });
 
       if (res.ok) {
+        const insertedRows = (await res.json()) as Array<{ id: string }>;
+        const incidentId = insertedRows[0]?.id;
         if (item.notifyPayload) {
           await fetch('/api/dispatch/notify', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(item.notifyPayload),
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${item.accessToken}`,
+            },
+            body: JSON.stringify({ incidentId }),
           }).catch(() => undefined);
         }
         await markOutboxItemSyncedClient(item.localId);

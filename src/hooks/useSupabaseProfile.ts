@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
+import { useRouter } from 'next/navigation';
 import { getSupabaseBrowserClient, isSupabaseClientConfigured } from '@/lib/supabase/client';
-import type { Profile } from '@/types/pulseguard';
+import type { Profile, UserRole } from '@/types/pulseguard';
 
 export interface SupabaseProfileState {
   configured: boolean;
@@ -25,6 +26,7 @@ export function useSupabaseProfile(): SupabaseProfileState {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !activeSession?.user) {
       setProfile(null);
+      setError(null);
       setLoading(false);
       return;
     }
@@ -37,40 +39,13 @@ export function useSupabaseProfile(): SupabaseProfileState {
 
     if (queryErr) {
       setError(queryErr.message);
+      setProfile(null);
     } else if (data) {
       setError(null);
       setProfile(data as Profile);
     } else {
-      // Ensure profile row exists if auth trigger hasn't fired or user existed prior to schema setup
-      const meta = activeSession.user.user_metadata || {};
-      const fallbackRole = ['citizen', 'responder', 'dispatcher', 'admin'].includes(meta.role)
-        ? meta.role
-        : 'citizen';
-      const { data: inserted, error: insertErr } = await supabase
-        .from('profiles')
-        .upsert(
-          {
-            id: activeSession.user.id,
-            email: activeSession.user.email || '',
-            full_name: meta.full_name || activeSession.user.email?.split('@')[0] || 'User',
-            role: fallbackRole,
-            responder_tier: meta.responder_tier || null,
-            nmc_registration_id: meta.nmc_registration_id || null,
-            abdm_hpr_id: meta.abdm_hpr_id || null,
-            bls_certification_id: meta.bls_certification_id || null,
-            specialty: meta.specialty || null,
-          },
-          { onConflict: 'id' }
-        )
-        .select('*')
-        .single();
-
-      if (insertErr) {
-        setError(insertErr.message);
-      } else {
-        setError(null);
-        setProfile(inserted as Profile);
-      }
+      setProfile(null);
+      setError('Your profile was not provisioned. Contact your PulseGuard administrator.');
     }
     setLoading(false);
   }, []);
@@ -78,6 +53,7 @@ export function useSupabaseProfile(): SupabaseProfileState {
   const refreshProfile = useCallback(async () => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
+    setLoading(true);
     const { data } = await supabase.auth.getSession();
     setSession(data.session);
     await fetchProfile(data.session);
@@ -121,4 +97,30 @@ export function useSupabaseProfile(): SupabaseProfileState {
     error,
     refreshProfile,
   };
+}
+
+const ROLE_DEFAULT_ROUTE: Record<UserRole, string> = {
+  citizen: '/portal/citizen',
+  responder: '/portal/responder',
+  dispatcher: '/portal/command',
+  admin: '/portal/governance',
+};
+
+export function usePortalAccess(allowedRole: UserRole | readonly UserRole[]) {
+  const router = useRouter();
+  const state = useSupabaseProfile();
+  const allowedRoles = Array.isArray(allowedRole) ? allowedRole : [allowedRole];
+  const allowedRoleKey = allowedRoles.join(',');
+  const authorized = Boolean(state.profile && allowedRoles.includes(state.profile.role));
+
+  useEffect(() => {
+    if (state.loading) return;
+    if (!state.profile) {
+      router.replace('/auth');
+    } else if (!allowedRoleKey.split(',').includes(state.profile.role)) {
+      router.replace(ROLE_DEFAULT_ROUTE[state.profile.role]);
+    }
+  }, [allowedRoleKey, router, state.loading, state.profile]);
+
+  return { ...state, authorized };
 }

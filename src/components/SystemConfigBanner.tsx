@@ -27,6 +27,7 @@ export default function SystemConfigBanner() {
     !status.supabaseUrlConfigured,
     !status.supabaseAnonKeyConfigured,
     !status.resendConfigured,
+    !status.resendFromConfigured,
     !status.geminiConfigured,
     !status.iotWebhookSecretConfigured,
   ].filter(Boolean).length;
@@ -48,6 +49,11 @@ export default function SystemConfigBanner() {
       key: 'RESEND_API_KEY',
       ok: status.resendConfigured,
       detail: 'Required for emergency family Code Blue email dispatch',
+    },
+    {
+      key: 'RESEND_FROM_EMAIL',
+      ok: status.resendFromConfigured,
+      detail: 'Required verified sender address for emergency email dispatch',
     },
     {
       key: 'GEMINI_API_KEY',

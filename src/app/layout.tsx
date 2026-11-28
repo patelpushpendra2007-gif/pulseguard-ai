@@ -20,7 +20,13 @@ export const metadata: Metadata = {
   title: 'PulseGuard AI · Real-Time Edge Sentinel & Emergency Mesh',
   description:
     'Zero-cloud Edge AI audio/biometric emergency sentinel, Web Crypto E2EE 52-byte binary SMS failover, and live NMC/ABDM responder dispatch mesh.',
+  applicationName: 'PulseGuard AI',
   manifest: '/manifest.json',
+  icons: {
+    icon: '/icon.svg',
+    shortcut: '/icon.svg',
+    apple: '/icon.svg',
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
@@ -32,6 +38,7 @@ export const viewport: Viewport = {
   themeColor: '#05080F',
   width: 'device-width',
   initialScale: 1,
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({

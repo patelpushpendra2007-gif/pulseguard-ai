@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
 import {
   Activity,
   CheckCircle2,
@@ -14,7 +13,7 @@ import {
 import AppNavbar from '@/components/AppNavbar';
 import LiveMapClient from '@/components/LiveMapClient';
 import type { MapMarkerPoint } from '@/components/LiveIncidentMap';
-import { useSupabaseProfile } from '@/hooks/useSupabaseProfile';
+import { usePortalAccess } from '@/hooks/useSupabaseProfile';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import {
   estimateEtaSeconds,
@@ -41,7 +40,7 @@ const NEXT_STATUS_OPTIONS: Record<IncidentStatus, IncidentStatus[]> = {
 };
 
 export default function CommandDeskPortalPage() {
-  const { loading, profile } = useSupabaseProfile();
+  const { loading, profile, authorized } = usePortalAccess(['dispatcher', 'admin']);
 
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [responders, setResponders] = useState<Profile[]>([]);
@@ -154,7 +153,7 @@ export default function CommandDeskPortalPage() {
         entries.push({
           ts: inc.accepted_at,
           tag: 'DISPATCHED',
-          detail: `Accepted by ${inc.responder_name || 'Responder'} (${inc.good_samaritan_cert_id || '134A'})`,
+          detail: `Accepted by ${inc.responder_name || 'Responder'}`,
         });
       }
       if (inc.en_route_at) {
@@ -250,28 +249,21 @@ export default function CommandDeskPortalPage() {
   const firstPin = mapMarkers[0];
   const mapCenter = firstPin
     ? { lat: firstPin.lat, lng: firstPin.lng }
-    : { lat: 28.6139, lng: 77.209 };
+    : null;
+
+  if (!authorized) {
+    return (
+      <div className="min-h-screen bg-[#05080F] p-8 text-center text-sm text-slate-300">
+        {loading ? 'Loading your account...' : 'Redirecting to your assigned portal...'}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#05080F] text-slate-100">
       <AppNavbar profile={profile} />
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {!loading && !profile && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-500/40 bg-cyan-950/30 p-4 text-xs text-cyan-100">
-            <span>
-              Sign in with a <strong>dispatcher</strong> or <strong>admin</strong> role to inspect
-              all citywide incidents and execute 112 lifecycle transitions.
-            </span>
-            <Link
-              href="/auth"
-              className="rounded-lg bg-cyan-600 px-3 py-1.5 font-semibold text-white hover:bg-cyan-500"
-            >
-              Sign In
-            </Link>
-          </div>
-        )}
-
         {/* Header & Live Counts */}
         <section className="rounded-2xl border border-slate-800 bg-[#0B1120] p-5">
           <div className="flex flex-wrap items-center justify-between gap-4">

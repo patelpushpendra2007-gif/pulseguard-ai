@@ -2,11 +2,13 @@
   "name": "PulseGuard AI — Clinical Emergency Mesh",
   "short_name": "PulseGuard AI",
   "description": "Zero-cloud Edge AI audio/biometric emergency sentinel, E2EE 52-byte binary SMS failover, and real-time NMC/ABDM responder mesh.",
+  "id": "/",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#05080F",
-  "theme_color": "#080D18",
+  "theme_color": "#05080F",
   "categories": ["medical", "health", "safety", "utilities"],
   "icons": [
     {

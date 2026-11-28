@@ -52,18 +52,18 @@ export interface LiveBiometricTelemetry {
   hrBpm: number | null;
   spo2Pct: number | null;
   hrvRmssdMs: number | null;
-  linearImuG: number;
-  gPeak: number;
-  canDeltaVKmh: number;
-  rolloverDeg: number;
-  omegaDegSec: number;
+  linearImuG: number | null;
+  gPeak: number | null;
+  canDeltaVKmh: number | null;
+  rolloverDeg: number | null;
+  omegaDegSec: number | null;
   dtcCode: string | null;
 }
 
 interface BiometricCrashPanelProps {
   powerState: PowerEngineState;
-  baselineHrBpm: number;
-  baselineRmssdMs: number;
+  baselineHrBpm: number | null;
+  baselineRmssdMs: number | null;
   onCalibrateBaseline: (hrBpm: number, rmssdMs: number) => Promise<void>;
   onTelemetryChange: (telemetry: LiveBiometricTelemetry) => void;
   onAutonomousTrigger: (triggerType: TriggerType, reason: string) => void;
@@ -113,7 +113,7 @@ export default function BiometricCrashPanel({
     ayMs2: 0,
     azMs2: 0,
     linearImuG: 0,
-    gPeak: 1.0,
+    gPeak: 0,
     tiltDeg: 0,
     omegaDegSec: 0,
     hasHardwareSamples: false,
@@ -142,7 +142,7 @@ export default function BiometricCrashPanel({
   });
 
   const [crashEval, setCrashEval] = useState<CrashAssessment>(() =>
-    evaluateCrashPhysics({ gPeak: 1.0, canDeltaVKmh: 0, tiltDeg: 0, omegaDegSec: 0 })
+    evaluateCrashPhysics({ gPeak: 0, canDeltaVKmh: 0, tiltDeg: 0, omegaDegSec: 0 })
   );
 
   const fireAutonomousTrigger = useCallback(
@@ -198,13 +198,29 @@ export default function BiometricCrashPanel({
   useEffect(() => {
     const effectiveGPeak = Math.max(imuMetrics.gPeak, obdMetrics.imuGPeak ?? 0);
 
-    const bio = distressTrackerRef.current.evaluate({
-      hrBpm,
-      rmssdMs,
-      baselineHrBpm,
-      baselineRmssdMs,
-      linearImuG: imuMetrics.linearImuG,
-    });
+    const bio =
+      baselineHrBpm !== null && baselineRmssdMs !== null
+        ? distressTrackerRef.current.evaluate({
+            hrBpm,
+            rmssdMs,
+            baselineHrBpm,
+            baselineRmssdMs,
+            linearImuG: imuMetrics.linearImuG,
+          })
+        : {
+            classification: 'STANDBY' as const,
+            panicTriggered: false,
+            deltaHrBpm: 0,
+            rmssdDropPct: 0,
+            linearImuG: imuMetrics.linearImuG,
+            sustainedSeconds: 0,
+            predicates: {
+              deltaHrGte35: false,
+              rmssdDropGt40: false,
+              linearImuLt015g: false,
+              sustained15s: false,
+            },
+          };
     setFusionEval(bio);
 
     const crash = evaluateCrashPhysics({
@@ -219,16 +235,18 @@ export default function BiometricCrashPanel({
       hrBpm,
       spo2Pct,
       hrvRmssdMs: rmssdMs,
-      linearImuG: imuMetrics.linearImuG,
-      gPeak: effectiveGPeak,
-      canDeltaVKmh: obdMetrics.deltaVKmh,
-      rolloverDeg: imuMetrics.tiltDeg,
-      omegaDegSec: imuMetrics.omegaDegSec,
+      linearImuG: imuMetrics.hasHardwareSamples ? imuMetrics.linearImuG : null,
+      gPeak:
+        obdMetrics.imuGPeak ??
+        (imuMetrics.hasHardwareSamples ? effectiveGPeak : null),
+      canDeltaVKmh: obdStatus.startsWith('Linked') ? obdMetrics.deltaVKmh : null,
+      rolloverDeg: imuMetrics.hasHardwareSamples ? imuMetrics.tiltDeg : null,
+      omegaDegSec: imuMetrics.hasHardwareSamples ? imuMetrics.omegaDegSec : null,
       dtcCode: obdMetrics.dtcCode,
     });
 
     if (powerState === 'ARMED_VIGILANT') {
-      if (bio.panicTriggered) {
+      if (bio.panicTriggered && imuMetrics.hasHardwareSamples) {
         fireAutonomousTrigger(
           'PPG_BIOMETRIC_DISTRESS',
           `Sustained ΔHR +${bio.deltaHrBpm} BPM (≥15s) & RMSSD drop ${bio.rmssdDropPct}% while still (${bio.linearImuG}g)`
@@ -250,6 +268,7 @@ export default function BiometricCrashPanel({
     baselineRmssdMs,
     imuMetrics,
     obdMetrics,
+    obdStatus,
     powerState,
     onTelemetryChange,
     fireAutonomousTrigger,
@@ -641,7 +660,10 @@ export default function BiometricCrashPanel({
             {hrBpm !== null ? `${hrBpm} BPM` : '--'}
           </div>
           <div className="font-mono text-[10px] text-slate-500">
-            Base {baselineHrBpm} (Δ{fusionEval.deltaHrBpm >= 0 ? `+${fusionEval.deltaHrBpm}` : fusionEval.deltaHrBpm})
+            Base {baselineHrBpm ?? 'Not calibrated'}
+            {baselineHrBpm !== null
+              ? ` (Δ${fusionEval.deltaHrBpm >= 0 ? `+${fusionEval.deltaHrBpm}` : fusionEval.deltaHrBpm})`
+              : ''}
           </div>
         </div>
 
@@ -651,7 +673,8 @@ export default function BiometricCrashPanel({
             {rmssdMs !== null ? `${rmssdMs} ms` : '--'}
           </div>
           <div className="font-mono text-[10px] text-slate-500">
-            Base {baselineRmssdMs}ms (-{fusionEval.rmssdDropPct}%)
+            Base {baselineRmssdMs === null ? 'Not calibrated' : `${baselineRmssdMs}ms`}
+            {baselineRmssdMs !== null ? ` (-${fusionEval.rmssdDropPct}%)` : ''}
           </div>
         </div>
 
@@ -666,7 +689,9 @@ export default function BiometricCrashPanel({
         <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
           <div className="text-[10px] font-mono text-slate-400">PEAK IMPACT G</div>
           <div className="mt-1 font-mono text-lg font-bold text-amber-300">
-            {crashEval.gPeak} G
+            {imuMetrics.hasHardwareSamples || obdMetrics.imuGPeak !== null
+              ? `${crashEval.gPeak} G`
+              : '--'}
           </div>
           <div className="font-mono text-[10px] text-slate-500">Crash &gt; 10G</div>
         </div>

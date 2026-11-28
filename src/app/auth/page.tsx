@@ -17,7 +17,7 @@ const ROLE_DEFAULT_ROUTE: Record<UserRole, string> = {
 
 export default function AuthPage() {
   const router = useRouter();
-  const { configured, profile, refreshProfile } = useSupabaseProfile();
+  const { configured, profile, error: profileError, refreshProfile } = useSupabaseProfile();
 
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
@@ -126,7 +126,7 @@ export default function AuthPage() {
             {mode === 'signin' ? 'Sign In to PulseGuard AI' : 'Create Authenticated Mesh Identity'}
           </h1>
           <p className="mt-1 text-xs text-slate-400">
-            Every account provisions a PostgreSQL profile protected by Supabase RLS policies.
+            Account profiles are provisioned by Supabase and protected by PostgreSQL RLS.
           </p>
 
           {!configured && (
@@ -137,6 +137,13 @@ export default function AuthPage() {
                 <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> and execute{' '}
                 <code className="font-mono">supabase/schema.sql</code> to enable live authentication.
               </div>
+            </div>
+          )}
+
+          {profileError && (
+            <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-500/40 bg-red-950/30 p-3 text-xs text-red-200">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+              <span>{profileError}</span>
             </div>
           )}
 
@@ -177,7 +184,7 @@ export default function AuthPage() {
                     required
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
-                    placeholder="e.g. Dr. Priya Sharma"
+                    placeholder="Full name"
                     className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none"
                   />
                 </div>
@@ -191,9 +198,10 @@ export default function AuthPage() {
                   >
                     <option value="citizen">Citizen / Safety Sentinel (Portal A)</option>
                     <option value="responder">Doctor / Nurse / BLS Responder (Portal B)</option>
-                    <option value="dispatcher">Smart City Police 112 Dispatcher (Portal C)</option>
-                    <option value="admin">IoT Hardware &amp; DPDP Governance Admin (Portal D)</option>
                   </select>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Police 112 and Hardware/DPDP access is provisioned by an administrator.
+                  </p>
                 </div>
 
                 {role === 'responder' && (
@@ -208,10 +216,10 @@ export default function AuthPage() {
                       className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
                     >
                       <option value="TIER_A_NMC">
-                        Tier A — Licensed NMC/NMR Doctor, Nurse, or CRMI
+                        Tier A — NMC/NMR Doctor, Nurse, or CRMI (ID is self-reported)
                       </option>
                       <option value="TIER_B_BLS">
-                        Tier B — AHA / Red Cross Certified BLS/CPR Volunteer
+                        Tier B — AHA / Red Cross BLS/CPR (ID is self-reported)
                       </option>
                     </select>
 
@@ -226,7 +234,7 @@ export default function AuthPage() {
                             required
                             value={nmcId}
                             onChange={(e) => setNmcId(e.target.value)}
-                            placeholder="NMC-DEL-XXXX"
+                            placeholder="NMC/NMR registration ID"
                             className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
                           />
                         </div>
@@ -238,7 +246,7 @@ export default function AuthPage() {
                             type="text"
                             value={abdmHprId}
                             onChange={(e) => setAbdmHprId(e.target.value)}
-                            placeholder="HPR-XX-XXXX"
+                            placeholder="ABDM HPR ID"
                             className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
                           />
                         </div>
@@ -253,7 +261,7 @@ export default function AuthPage() {
                           required
                           value={blsCertId}
                           onChange={(e) => setBlsCertId(e.target.value)}
-                          placeholder="AHA-BLS-XXXX"
+                          placeholder="BLS certification ID"
                           className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
@@ -265,7 +273,7 @@ export default function AuthPage() {
                         type="text"
                         value={specialty}
                         onChange={(e) => setSpecialty(e.target.value)}
-                        placeholder="e.g. Emergency Medicine / Cardiology / BLS First Aid"
+                        placeholder="Clinical specialty"
                         className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
                       />
                     </div>

@@ -46,8 +46,8 @@ export interface Profile {
   emergency_contact_phone: string | null;
   safeword_hash: string | null;
   safeword_word_count: number | null;
-  baseline_hr_bpm: number;
-  baseline_rmssd_ms: number;
+  baseline_hr_bpm: number | null;
+  baseline_rmssd_ms: number | null;
   responder_tier: ResponderTier | null;
   nmc_registration_id: string | null;
   abdm_hpr_id: string | null;
@@ -74,6 +74,13 @@ export interface TriageGuidance {
   handoverSummary108: string;
   generatedAt: string;
   model: string;
+}
+
+export interface EmergencyTriageGuidance {
+  responderBullets: string[];
+  citizenSteps: string[];
+  source: 'gemini' | 'fallback';
+  notice: string | null;
 }
 
 export interface Incident {
@@ -110,12 +117,10 @@ export interface Incident {
   responder_id: string | null;
   responder_name: string | null;
   responder_tier: ResponderTier | null;
-  responder_nmc_id: string | null;
+  responder_credential_id: string | null;
   responder_lat: number | null;
   responder_lng: number | null;
   responder_updated_at: string | null;
-  good_samaritan_cert_id: string | null;
-  indemnity_amount_inr: number;
   triage_notes: TriageGuidance | null;
   accepted_at: string | null;
   en_route_at: string | null;
@@ -160,6 +165,7 @@ export interface ConfigHealthStatus {
   supabaseAnonKeyConfigured: boolean;
   supabaseServiceRoleConfigured: boolean;
   resendConfigured: boolean;
+  resendFromConfigured: boolean;
   geminiConfigured: boolean;
   iotWebhookSecretConfigured: boolean;
   allCoreConfigured: boolean;

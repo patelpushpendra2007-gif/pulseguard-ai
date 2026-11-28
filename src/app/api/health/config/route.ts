@@ -19,6 +19,9 @@ export async function GET() {
   const resendConfigured = Boolean(
     process.env.RESEND_API_KEY && process.env.RESEND_API_KEY.trim().length > 5
   );
+  const resendFromConfigured = Boolean(
+    process.env.RESEND_FROM_EMAIL && process.env.RESEND_FROM_EMAIL.trim().length > 5
+  );
   const geminiConfigured = Boolean(
     process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 5
   );
@@ -31,12 +34,14 @@ export async function GET() {
     supabaseAnonKeyConfigured,
     supabaseServiceRoleConfigured,
     resendConfigured,
+    resendFromConfigured,
     geminiConfigured,
     iotWebhookSecretConfigured,
     allCoreConfigured:
       supabaseUrlConfigured &&
       supabaseAnonKeyConfigured &&
       resendConfigured &&
+      resendFromConfigured &&
       iotWebhookSecretConfigured,
   };
 

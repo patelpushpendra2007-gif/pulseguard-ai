@@ -1,7 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
-import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 import {
   CheckCircle2,
   Cpu,
@@ -14,12 +13,11 @@ import {
   Webhook,
 } from 'lucide-react';
 import AppNavbar from '@/components/AppNavbar';
-import { useSupabaseProfile } from '@/hooks/useSupabaseProfile';
+import { usePortalAccess } from '@/hooks/useSupabaseProfile';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { encodeGeoHash } from '@/lib/geohash';
 import { clearOfflineOutbox } from '@/lib/offline/outbox';
 import type {
-  AedStatus,
   ConsentScope,
   DpdpConsentLog,
   HardwareNode,
@@ -55,7 +53,7 @@ const CONSENT_SCOPES: Array<{ scope: ConsentScope; label: string; purpose: strin
 ];
 
 export default function GovernancePortalPage() {
-  const { loading, profile, refreshProfile } = useSupabaseProfile();
+  const { loading, profile, refreshProfile, authorized } = usePortalAccess('admin');
 
   const [nodes, setNodes] = useState<HardwareNode[]>([]);
   const [consentLogs, setConsentLogs] = useState<DpdpConsentLog[]>([]);
@@ -64,24 +62,17 @@ export default function GovernancePortalPage() {
   const [deviceUid, setDeviceUid] = useState('');
   const [nodeType, setNodeType] = useState<HardwareNodeType>('OBD_II_PRO');
   const [label, setLabel] = useState('');
-  const [firmwareVersion, setFirmwareVersion] = useState('1.4.2');
+  const [firmwareVersion, setFirmwareVersion] = useState('');
   const [latInput, setLatInput] = useState('');
   const [lngInput, setLngInput] = useState('');
-  const [aedStatus, setAedStatus] = useState<AedStatus>('READY');
   const [submittingNode, setSubmittingNode] = useState(false);
 
   const [notice, setNotice] = useState<string | null>(null);
-  const originUrl = useSyncExternalStore(
-    () => () => undefined,
-    () => window.location.origin,
-    () => 'https://your-deployment.vercel.app'
-  );
-
   const loadGovernanceData = useCallback(async () => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
 
-    const [{ data: nodeRows }, { data: logRows }] = await Promise.all([
+    const [{ data: nodeRows, error: nodeError }, { data: logRows, error: logError }] = await Promise.all([
       supabase.from('hardware_nodes').select('*').order('created_at', { ascending: false }),
       supabase
         .from('dpdp_consent_logs')
@@ -89,6 +80,11 @@ export default function GovernancePortalPage() {
         .order('created_at', { ascending: false })
         .limit(50),
     ]);
+
+    if (nodeError || logError) {
+      setNotice(nodeError?.message || logError?.message || 'Failed to load governance data.');
+      return;
+    }
 
     setNodes((nodeRows as HardwareNode[]) || []);
     setConsentLogs((logRows as DpdpConsentLog[]) || []);
@@ -136,12 +132,12 @@ export default function GovernancePortalPage() {
         device_uid: deviceUid.trim(),
         node_type: nodeType,
         label: label.trim(),
-        firmware_version: firmwareVersion.trim() || '1.0.0',
+        firmware_version: firmwareVersion.trim(),
         lat,
         lng,
         geohash,
-        status: 'ONLINE',
-        aed_status: nodeType === 'PULSEBOX_AED' ? aedStatus : 'N/A',
+        status: 'OFFLINE',
+        aed_status: 'N/A',
       });
       if (error) throw error;
 
@@ -159,7 +155,11 @@ export default function GovernancePortalPage() {
   const handleDeleteNode = async (id: string) => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
-    await supabase.from('hardware_nodes').delete().eq('id', id);
+    const { error } = await supabase.from('hardware_nodes').delete().eq('id', id);
+    if (error) {
+      setNotice(error.message);
+      return;
+    }
     await loadGovernanceData();
   };
 
@@ -190,18 +190,33 @@ export default function GovernancePortalPage() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
 
-    const [{ data: myIncidents }, { data: myNodes }, { data: myLogs }] = await Promise.all([
+    const [
+      { data: myIncidents, error: incidentError },
+      { data: myNodes, error: nodeError },
+      { data: myLogs, error: logError },
+    ] = await Promise.all([
       supabase.from('incidents').select('*').eq('victim_id', profile.id),
       supabase.from('hardware_nodes').select('*').eq('owner_id', profile.id),
       supabase.from('dpdp_consent_logs').select('*').eq('user_id', profile.id),
     ]);
 
-    await supabase.from('dpdp_consent_logs').insert({
+    if (incidentError || nodeError || logError) {
+      setNotice(
+        incidentError?.message || nodeError?.message || logError?.message || 'Failed to export data.'
+      );
+      return;
+    }
+
+    const { error: exportLogError } = await supabase.from('dpdp_consent_logs').insert({
       user_id: profile.id,
       consent_scope: 'ALL_SERVICES_DATA_ERASURE',
       action: 'EXPORTED',
       purpose_description: 'DPDP Act 2023 Section 11 Right to Access / Data Portability export.',
     });
+    if (exportLogError) {
+      setNotice(exportLogError.message);
+      return;
+    }
 
     const exportBundle = {
       exportedAt: new Date().toISOString(),
@@ -226,55 +241,63 @@ export default function GovernancePortalPage() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !profile) return;
 
-    await supabase.from('dpdp_consent_logs').insert({
-      user_id: profile.id,
-      consent_scope: 'ALL_SERVICES_DATA_ERASURE',
-      action: 'ERASED',
-      purpose_description:
-        'DPDP Act 2023 Section 12 Right to Erasure — wiped optional medical fields, SafeWord hash & local IndexedDB.',
-    });
-
-    await supabase
+    const { error: updateError } = await supabase
       .from('profiles')
       .update({
         phone: null,
         blood_group: null,
-        allergies: 'Erased per DPDP request',
-        medical_conditions: 'Erased per DPDP request',
+        allergies: null,
+        medical_conditions: null,
         emergency_contact_name: null,
         emergency_contact_email: null,
         emergency_contact_phone: null,
         safeword_hash: null,
+        baseline_hr_bpm: null,
+        baseline_rmssd_ms: null,
+        current_lat: null,
+        current_lng: null,
+        current_geohash: null,
+        last_location_at: null,
         dpdp_consent_granted: false,
+        dpdp_consent_at: null,
       })
       .eq('id', profile.id);
+    if (updateError) {
+      setNotice(updateError.message);
+      return;
+    }
+
+    const { error: logError } = await supabase.from('dpdp_consent_logs').insert({
+      user_id: profile.id,
+      consent_scope: 'ALL_SERVICES_DATA_ERASURE',
+      action: 'ERASED',
+      purpose_description:
+        'Optional profile and location fields cleared; historical incidents and consent logs retained.',
+    });
+    if (logError) {
+      setNotice(logError.message);
+      return;
+    }
 
     await clearOfflineOutbox();
     await refreshProfile();
     await loadGovernanceData();
-    setNotice('DPDP Act 2023 Right to Erasure executed across PostgreSQL & IndexedDB.');
+    setNotice('Optional profile fields cleared. Incident and audit history was retained.');
   };
+
+  if (!authorized) {
+    return (
+      <div className="min-h-screen bg-[#05080F] p-8 text-center text-sm text-slate-300">
+        {loading ? 'Loading your account...' : 'Redirecting to your assigned portal...'}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#05080F] text-slate-100">
       <AppNavbar profile={profile} />
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {!loading && !profile && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 text-xs text-amber-100">
-            <span>
-              Sign in to register physical ESP32-S3 OBD-II / PulseBox AED hardware nodes and manage
-              DPDP Act 2023 consent &amp; data rights.
-            </span>
-            <Link
-              href="/auth"
-              className="rounded-lg bg-amber-600 px-3 py-1.5 font-semibold text-white hover:bg-amber-500"
-            >
-              Sign In
-            </Link>
-          </div>
-        )}
-
         <section className="rounded-2xl border border-slate-800 bg-[#0B1120] p-5">
           <div className="flex items-center gap-2 font-mono text-xs text-amber-400">
             <Cpu className="h-4 w-4" />
@@ -310,7 +333,7 @@ export default function GovernancePortalPage() {
                   required
                   value={deviceUid}
                   onChange={(e) => setDeviceUid(e.target.value)}
-                  placeholder="e.g. OBD-PRO-ESP32-01"
+                  placeholder="Device UID"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -335,7 +358,7 @@ export default function GovernancePortalPage() {
                   required
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
-                  placeholder="e.g. Gate 2 Security AED Cabinet"
+                  placeholder="Deployment label"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -348,7 +371,7 @@ export default function GovernancePortalPage() {
                   required
                   value={latInput}
                   onChange={(e) => setLatInput(e.target.value)}
-                  placeholder="28.5672"
+                  placeholder="Latitude"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -361,7 +384,7 @@ export default function GovernancePortalPage() {
                   required
                   value={lngInput}
                   onChange={(e) => setLngInput(e.target.value)}
-                  placeholder="77.2100"
+                  placeholder="Longitude"
                   className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white focus:border-cyan-500 focus:outline-none"
                 />
               </div>
@@ -377,28 +400,14 @@ export default function GovernancePortalPage() {
                 </button>
                 <input
                   type="text"
+                  required
                   value={firmwareVersion}
                   onChange={(e) => setFirmwareVersion(e.target.value)}
-                  placeholder="FW v1.4.2"
+                  aria-label="Firmware version"
+                  placeholder="Firmware version"
                   className="w-28 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-2 font-mono text-xs text-white"
                 />
               </div>
-
-              {nodeType === 'PULSEBOX_AED' && (
-                <div>
-                  <label className="block text-xs text-slate-300">AED Cabinet State</label>
-                  <select
-                    value={aedStatus}
-                    onChange={(e) => setAedStatus(e.target.value as AedStatus)}
-                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
-                  >
-                    <option value="READY">READY</option>
-                    <option value="UNLOCKED">UNLOCKED</option>
-                    <option value="IN_USE">IN_USE</option>
-                    <option value="SERVICE_REQUIRED">SERVICE_REQUIRED</option>
-                  </select>
-                </div>
-              )}
 
               <div className="sm:col-span-2 lg:col-span-3 flex justify-end">
                 <button
@@ -495,17 +504,10 @@ export default function GovernancePortalPage() {
             )}
           </div>
 
-          <div className="mt-4 rounded-xl border border-slate-800 bg-[#05080F] p-3.5">
-            <div className="font-mono text-[11px] font-bold text-slate-300">
-              ESP32-S3 Hardware Webhook Command Snippet
-            </div>
-            <pre className="mt-2 overflow-x-auto font-mono text-[11px] text-cyan-300">
-{`curl -X POST ${originUrl}/api/iot/telemetry \\
-  -H "Content-Type: application/json" \\
-  -H "x-iot-secret: <IOT_WEBHOOK_SECRET>" \\
-  -d '{"device_uid":"${nodes[0]?.device_uid || 'OBD-PRO-ESP32-01'}","lat":28.5672,"lng":77.2100,"g_peak":12.4,"can_delta_v":42,"dtc_code":"B1001","battery_pct":95}'`}
-            </pre>
-          </div>
+          <p className="mt-4 rounded-xl border border-slate-800 bg-[#05080F] p-3.5 text-xs text-slate-400">
+            Configure each device to POST its registered UID and measured telemetry to this
+            endpoint. New nodes remain offline until their first authenticated heartbeat.
+          </p>
         </section>
 
         {/* DPDP Act 2023 Explicit Consent & Data Portability / Erasure */}

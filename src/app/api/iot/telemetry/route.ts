@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
   const geohash = ngeohash.encode(body.lat, body.lng, 7);
   const nowIso = new Date().toISOString();
 
-  const gPeak = Number(body.g_peak ?? 1.0);
+  const gPeak = Number(body.g_peak ?? 0);
   const canDeltaV = Number(body.can_delta_v ?? 0);
   const rolloverDeg = Number(body.rollover_deg ?? 0);
   const omegaDegS = Number(body.omega_deg_s ?? 0);
@@ -163,10 +163,10 @@ export async function POST(req: NextRequest) {
       battery_pct: body.battery_pct ?? undefined,
       last_ping_at: nowIso,
       last_telemetry: {
-        g_peak: gPeak,
-        can_delta_v: canDeltaV,
-        rollover_deg: rolloverDeg,
-        omega_deg_s: omegaDegS,
+        g_peak: body.g_peak ?? null,
+        can_delta_v: body.can_delta_v ?? null,
+        rollover_deg: body.rollover_deg ?? null,
+        omega_deg_s: body.omega_deg_s ?? null,
         dtc_code: body.dtc_code ?? null,
         manual_sos: Boolean(body.manual_sos),
         received_at: nowIso,
@@ -218,10 +218,10 @@ export async function POST(req: NextRequest) {
         geohash,
         hr_bpm: body.hr_bpm ?? null,
         spo2_pct: body.spo2_pct ?? null,
-        crash_g_peak: crashEval.gPeak,
-        can_delta_v_kmh: crashEval.canDeltaVKmh,
-        rollover_deg: crashEval.tiltDeg,
-        omega_deg_s: crashEval.omegaDegSec,
+        crash_g_peak: body.g_peak == null ? null : crashEval.gPeak,
+        can_delta_v_kmh: body.can_delta_v == null ? null : crashEval.canDeltaVKmh,
+        rollover_deg: body.rollover_deg == null ? null : crashEval.tiltDeg,
+        omega_deg_s: body.omega_deg_s == null ? null : crashEval.omegaDegSec,
         dtc_code: body.dtc_code ?? null,
         encrypted_payload_b64: cryptoPacket.encryptedPayloadBase64,
         sms_frame_52b_b64: cryptoPacket.smsFrame52BBase64,
